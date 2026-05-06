@@ -1,0 +1,274 @@
+# ==============================================================
+# 自定义 Armbian 构建脚本（纯净 DTB + 完整内核替换）
+# 功能：
+#   1. 从 ophub/amlogic-s9xxx-armbian 下载官方基础镜像
+#   2. 从 ophub/kernel 下载你指定的精确内核版本并进行完整替换 (vmlinuz, modules, headers)
+#   3. 根据设备型号自动匹配 make/dtb/ 下的 .dtb 文件并注入
+#   4. 重新打包并上传到 Release
+# 使用要求：
+#   - 将 .dtb 命名为 “设备型号.dtb” 放入 make/dtb/ 目录
+#   - 确保仓库 Settings → Actions → Workflow permissions 勾选 Read and write permissions
+# ==============================================================
+
+name: Custom Build Armbian (DTB + Full Kernel)
+
+on:
+  workflow_dispatch:
+    inputs:
+      armbian_release:
+        description: "Armbian 系统版本"
+        required: true
+        type: choice
+        default: "bookworm"
+        options:
+          - trixie
+          - bookworm
+          - noble
+      armbian_board:
+        description: "目标设备型号（同时用于匹配 make/dtb/ 下的 .dtb 文件）"
+        required: true
+        type: string
+        default: "s905lb-r3300l"
+      armbian_kernel:
+        description: "内核版本"
+        required: true
+        type: choice
+        default: "5.15.y"
+        options:
+          - 5.15.y
+          - 6.1.y
+          - 6.6.y
+          - 6.12.y
+          - 6.18.y
+      builder_name:
+        description: "固件签名"
+        required: true
+        type: choice
+        default: "ophub"
+        options:
+          - ophub
+          - angel
+          - yourname
+
+env:
+  TZ: Etc/UTC
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    if: github.event.repository.owner.id == github.event.sender.id
+
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v6
+
+      - name: 初始化环境
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xz-utils jq curl
+
+      # ==================== 下载基础镜像 ====================
+      - name: 下载 Armbian 基础镜像
+        id: download_image
+        run: |
+          RELEASE="${{ inputs.armbian_release }}"
+          echo "系统版本: ${RELEASE}"
+
+          RELEASE_JSON=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/ophub/amlogic-s9xxx-armbian/releases?per_page=20)
+
+          IMAGE_ASSET=$(echo "${RELEASE_JSON}" | jq -r \
+            --arg REL "Armbian_${RELEASE}_arm64_" \
+            --arg TRUNK "-trunk_" \
+            '[.[] | select(.tag_name | contains($REL))] |
+             map(.assets[] | select(.name | contains($TRUNK) and endswith(".img.gz"))) |
+             sort_by(.updated_at) | reverse | .[0]')
+
+          if [[ -z "${IMAGE_ASSET}" || "${IMAGE_ASSET}" == "null" ]]; then
+            echo "❌ 未找到 ${RELEASE} 的基础镜像"
+            exit 1
+          fi
+
+          IMAGE_URL=$(echo "${IMAGE_ASSET}" | jq -r '.url')
+          IMAGE_NAME=$(echo "${IMAGE_ASSET}" | jq -r '.name')
+
+          echo "下载镜像: ${IMAGE_NAME}"
+          curl -fsSL \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/octet-stream" \
+            "${IMAGE_URL}" \
+            -o "${IMAGE_NAME}"
+
+          if [[ ! -f "${IMAGE_NAME}" ]]; then
+            echo "❌ 下载失败"
+            exit 1
+          fi
+
+          echo "✅ 基础镜像已下载: ${IMAGE_NAME}"
+          echo "image_file=${IMAGE_NAME}" >> $GITHUB_ENV
+
+      # ==================== 解压并挂载 ====================
+      - name: 解压并挂载基础镜像
+        id: mount
+        run: |
+          IMAGE_FILE="${{ env.image_file }}"
+          gzip -d "${IMAGE_FILE}"
+          BASE_IMAGE="${IMAGE_FILE%.gz}"
+          echo "解压后镜像: ${BASE_IMAGE}"
+
+          LOOP_DEV=$(sudo losetup -fP --show "${BASE_IMAGE}")
+          echo "loop设备: ${LOOP_DEV}"
+          sudo partprobe "${LOOP_DEV}" || true
+          sleep 2
+
+          # 优先挂载 p2，若失败则尝试 p1
+          if sudo mount "${LOOP_DEV}p2" /mnt 2>/dev/null; then
+            echo "已挂载 ${LOOP_DEV}p2 → /mnt"
+          else
+            echo "p2 不存在，尝试挂载 p1"
+            sudo mount "${LOOP_DEV}p1" /mnt
+            echo "已挂载 ${LOOP_DEV}p1 → /mnt"
+          fi
+
+          echo "base_image=${BASE_IMAGE}" >> $GITHUB_ENV
+          echo "loop_dev=${LOOP_DEV}" >> $GITHUB_ENV
+
+      # ==================== 完整内核替换 ====================
+      - name: 下载并完整替换内核
+        id: kernel
+        run: |
+          KERNEL_VERSION="${{ inputs.armbian_kernel }}"
+          echo "目标内核: ${KERNEL_VERSION}"
+
+          # 若使用你自己的仓库，更换下面 URL 为你的仓库地址（如 https://api.github.com/repos/slhlicheno/kernel/releases/tags/kernel_stable）
+          KERNEL_RELEASE=$(curl -s \
+            -H "Accept: application/vnd.github+json" \
+            https://api.github.com/repos/ophub/kernel/releases/tags/kernel_stable)
+
+          # 精确匹配：文件名包含类似 "5.15."，以 .tar.gz 结尾，且不包含 "deb-" 前缀的历史包
+          KVER_MATCH="${KERNEL_VERSION%.y}."   # 5.15.y → 5.15.
+          KERNEL_ASSET=$(echo "${KERNEL_RELEASE}" | jq -r \
+            --arg KVER "${KVER_MATCH}" \
+            '[.assets[] | select(.name | contains($KVER) and endswith(".tar.gz") and (contains("deb-") | not))] | sort_by(.updated_at) | reverse | .[0]')
+
+          if [[ -z "${KERNEL_ASSET}" || "${KERNEL_ASSET}" == "null" ]]; then
+            echo "❌ 未找到 ${KERNEL_VERSION} 的内核包"
+            exit 1
+          fi
+
+          KERNEL_URL=$(echo "${KERNEL_ASSET}" | jq -r '.browser_download_url')
+          KERNEL_NAME=$(echo "${KERNEL_ASSET}" | jq -r '.name')
+
+          echo "下载内核: ${KERNEL_NAME}"
+          curl -fsSL -o "${KERNEL_NAME}" "${KERNEL_URL}"
+
+          mkdir -p kernel_tmp
+          tar -xzf "${KERNEL_NAME}" -C kernel_tmp
+
+          # 1. 替换内核镜像与相关文件
+          if [[ -d kernel_tmp/boot ]]; then
+            # 替换 vmlinuz, System.map, config 等启动核心文件
+            sudo find kernel_tmp/boot -name "vmlinuz-*" -exec sh -c 'cp -f "$1" "/mnt/boot/$(basename "$1")"' _ {} \;
+            sudo find kernel_tmp/boot -name "System.map-*" -exec sh -c 'cp -f "$1" "/mnt/boot/$(basename "$1")"' _ {} \;
+            sudo find kernel_tmp/boot -name "config-*" -exec sh -c 'cp -f "$1" "/mnt/boot/$(basename "$1")"' _ {} \;
+            
+            # 更新通用的启动文件链接
+            if [ -f /mnt/boot/vmlinuz ]; then
+                sudo rm /mnt/boot/vmlinuz
+            fi
+            sudo ln -s /mnt/boot/$(ls kernel_tmp/boot/vmlinuz-*) /mnt/boot/vmlinuz 2>/dev/null || echo "⚠️ 未创建vmlinuz链接"
+            
+            echo "✅ 内核镜像(vmlinuz)及相关文件已更新"
+          fi
+
+          # 2. 替换内核模块
+          if [[ -d kernel_tmp/lib/modules ]]; then
+            # 清空旧模块目录以避免版本冲突
+            sudo rm -rf /mnt/lib/modules/*
+            sudo cp -r kernel_tmp/lib/modules/* /mnt/lib/modules/
+            echo "✅ 内核模块已更新"
+          fi
+
+          # 3. 替换内核头文件(如果存在)
+          if [[ -d kernel_tmp/usr ]]; then
+            sudo cp -r kernel_tmp/usr/* /mnt/usr/
+            echo "✅ 内核头文件已更新"
+          fi
+
+          echo "✅ 内核已完整替换为 ${KERNEL_NAME}"
+
+      # ==================== 注入自定义 DTB ====================
+      - name: 注入自定义 DTB 并调整启动配置
+        id: inject_dtb
+        run: |
+          BOARD="${{ inputs.armbian_board }}"
+          # 判断平台
+          if [[ "${BOARD}" == s9* || "${BOARD}" == a311d* || "${BOARD}" == s922* ]]; then
+            PLATFORM="amlogic"
+          elif [[ "${BOARD}" == rk* || "${BOARD}" == firefly* || "${BOARD}" == orangepi* || "${BOARD}" == nanopi* ]]; then
+            PLATFORM="rockchip"
+          else
+            PLATFORM="amlogic"
+          fi
+
+          DTB_FILE="${{ github.workspace }}/make/dtb/${BOARD}.dtb"
+          if [[ ! -f "${DTB_FILE}" ]]; then
+            echo "❌ 找不到 DTB 文件: ${DTB_FILE}"
+            echo "请将 .dtb 命名为 ${BOARD}.dtb 并放入 make/dtb/ 目录"
+            exit 1
+          fi
+
+          TARGET_DIR="/mnt/boot/dtb/${PLATFORM}"
+          sudo mkdir -p "${TARGET_DIR}"
+          sudo cp "${DTB_FILE}" "${TARGET_DIR}/"
+
+          # 修改启动配置以加载自定义 DTB
+          EXTLINUX_CONF="/mnt/boot/extlinux/extlinux.conf"
+          UENV_TXT="/mnt/boot/uEnv.txt"
+          if [[ -f "${EXTLINUX_CONF}" ]]; then
+            sudo sed -i "s|FDT /dtb/${PLATFORM}/.*|FDT /dtb/${PLATFORM}/${BOARD}.dtb|" "${EXTLINUX_CONF}"
+            echo "✅ 已更新 extlinux.conf"
+          elif [[ -f "${UENV_TXT}" ]]; then
+            echo "FDT=/dtb/${PLATFORM}/${BOARD}.dtb" | sudo tee "${UENV_TXT}"
+            echo "✅ 已更新 uEnv.txt"
+          else
+            echo "⚠️ 未找到启动配置文件，可能需要手动调整"
+          fi
+
+          echo "✅ DTB 已注入: ${BOARD}.dtb"
+
+      # ==================== 卸载并重新压缩 ====================
+      - name: 卸载并重新压缩镜像
+        id: repack
+        run: |
+          LOOP_DEV="${{ env.loop_dev }}"
+          sudo umount /mnt
+          sudo losetup -d "${LOOP_DEV}"
+          BASE_IMAGE="${{ env.base_image }}"
+          xz -T0 "${BASE_IMAGE}"
+          PACKAGED_IMAGE="${BASE_IMAGE}.xz"
+          echo "packaged_image=${PACKAGED_IMAGE}" >> $GITHUB_ENV
+          echo "✅ 镜像已重新压缩: ${PACKAGED_IMAGE}"
+
+      # ==================== 上传到 Release ====================
+      - name: 上传到 Release
+        uses: ncipollo/release-action@main
+        with:
+          tag: "Armbian_${{ inputs.armbian_release }}_${{ inputs.armbian_board }}_${{ inputs.armbian_kernel }}_custom"
+          artifacts: "${{ env.packaged_image }}"
+          allowUpdates: true
+          removeArtifacts: false
+          replacesArtifacts: true
+          makeLatest: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            📦 自定义 Armbian 镜像（已完整替换内核）
+            - 系统版本: ${{ inputs.armbian_release }}
+            - 设备型号: ${{ inputs.armbian_board }}
+            - 内核版本: ${{ inputs.armbian_kernel }}
+            - DTB 文件: ${{ inputs.armbian_board }}.dtb
