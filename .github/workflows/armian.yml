@@ -118,12 +118,13 @@ jobs:
           sudo mkfs.vfat "${LOOP_DEV}p1"
           sudo mkfs.ext4 "${LOOP_DEV}p2"
           sudo mount "${LOOP_DEV}p1" /mnt
+          sudo mkdir -p /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt2
           sudo cp -a boot_contents/* /mnt/
           sudo tar -xzf "${{ env.rootfs_file }}" -C /mnt2
           sync
           echo "loop_dev=$LOOP_DEV" >> $GITHUB_ENV
-
+      
       - name: 下载并替换内核
         id: kernel
         run: |
