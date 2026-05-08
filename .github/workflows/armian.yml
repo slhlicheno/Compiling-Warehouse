@@ -92,7 +92,8 @@ jobs:
           echo "trunk_image=$TRUNK_NAME" >> $GITHUB_ENV
           echo "rootfs_file=$ROOTFS_NAME" >> $GITHUB_ENV
 
-      - name: 提取并清理 trunk 中的 boot 文件
+      # ---------- 关键：精准提取，只取我们需要的 ----------
+      - name: 提取 trunk 中的 boot 文件
         run: |
           TRUNK_IMAGE="${{ env.trunk_image }}"
           gzip -d "$TRUNK_IMAGE"
@@ -101,25 +102,41 @@ jobs:
           sudo partprobe "$LOOP_DEV" || true
           sleep 2
           sudo mount "${LOOP_DEV}p1" /mnt
-          mkdir -p boot_contents
-          sudo cp -a /mnt/* boot_contents/
-          
-          # 删除所有旧内核文件，腾出空间（后续会由新内核包重新提供）
-          echo "正在清理旧内核文件..."
-          find boot_contents -maxdepth 1 -type f -name "vmlinuz-*" -delete
-          find boot_contents -maxdepth 1 -type f -name "System.map-*" -delete
-          find boot_contents -maxdepth 1 -type f -name "config-*" -delete
-          find boot_contents -maxdepth 1 -type f -name "uInitrd-*" -delete
-          find boot_contents -maxdepth 1 -type f -name "initrd.img-*" -delete
-          # 删除软链接 vmlinuz, vmlinuz.old, initrd.img, uInitrd（它们指向被删的文件）
-          find boot_contents -maxdepth 1 -type l -name "vmlinuz*" -delete
-          find boot_contents -maxdepth 1 -type l -name "initrd*" -delete
-          find boot_contents -maxdepth 1 -type l -name "uInitrd*" -delete
-          echo "✅ 旧内核文件已清理"
-          
+
+          # 创建一个干净的临时目录
+          rm -rf clean_boot && mkdir -p clean_boot
+
+          # 显式列出需要保留的文件/目录列表
+          keep_list=(
+            "armbianEnv.txt"
+            "boot.ini"
+            "config-*"
+            "dtb"
+            "extlinux"
+            "uEnv.txt"
+            "uInitrd-*"
+            "initrd.img-*"
+            "System.map-*"
+            "vmlinuz-*"
+            "zImage"
+            "Image"
+          )
+
+          # 只复制列表里的文件和目录
+          for item in "${keep_list[@]}"; do
+            for match in /mnt/$item; do
+              if [ -e "$match" ] || [ -L "$match" ]; then
+                cp -a "$match" clean_boot/ 2>/dev/null || true
+                echo "已保留: $(basename "$match")"
+              fi
+            done
+          done
+
+          # 清理干净
           sudo umount /mnt
           sudo losetup -d "$LOOP_DEV"
 
+      # ---------- 制作完整镜像 ----------
       - name: 创建完整镜像并分区
         run: |
           IMG_SIZE=4096
@@ -136,8 +153,9 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt
           sudo mkdir -p /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt2
-          # 复制时跳过可能残留的文件，并跟随链接
-          rsync -rL --exclude='vmlinuz*' --exclude='System.map*' --exclude='config-*' --exclude='uInitrd*' --exclude='initrd*' boot_contents/ /mnt/
+
+          # 复制干净的 boot 内容（不保留特殊权限）
+          sudo cp -r clean_boot/* /mnt/
           sudo tar -xzf "${{ env.rootfs_file }}" -C /mnt2
           sync
           echo "loop_dev=$LOOP_DEV" >> $GITHUB_ENV
@@ -226,7 +244,7 @@ jobs:
           makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 自定义 Armbian（自建基础镜像）
+            📦 自定义 Armbiab（自建基础镜像）
             - 系统: ${{ inputs.armbian_release }}
             - 设备: ${{ inputs.armbian_board }}
             - 内核: ${{ inputs.armbian_kernel }}
