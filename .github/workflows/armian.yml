@@ -103,7 +103,7 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt
           mkdir -p boot_contents
           
-          # 只复制真正的启动文件，跳过不必要的系统目录
+          # 只复制真正的启动文件，跳过不必要的系统目录和符号链接
           for item in /mnt/*; do
             base=$(basename "$item")
             case "$base" in
@@ -111,7 +111,21 @@ jobs:
                 echo "跳过系统目录: $base"
                 ;;
               *)
-                sudo cp -a "$item" boot_contents/
+                # 如果是符号链接且指向的是跳过目录内的文件，也跳过
+                if [ -L "$item" ]; then
+                  link_target=$(readlink "$item")
+                  case "$link_target" in
+                    /bin/*|/dev/*|/etc/*|/lib/*|/lib64/*|/proc/*|/run/*|/sbin/*|/sys/*|/usr/*|/var/*)
+                      echo "跳过无效符号链接: $base -> $link_target"
+                      ;;
+                    *)
+                      # 跟随链接复制实际文件内容
+                      cp -rL "$item" boot_contents/ 2>/dev/null || echo "跳过无法复制的链接: $base"
+                      ;;
+                  esac
+                else
+                  cp -rL "$item" boot_contents/ 2>/dev/null || echo "跳过: $base"
+                fi
                 ;;
             esac
           done
@@ -120,10 +134,13 @@ jobs:
 
       - name: 创建完整镜像并分区
         run: |
-          dd if=/dev/zero of=final.img bs=1M count=3072
+          # 镜像大小改为 4GB，boot 分区 256MB
+          IMG_SIZE=4096
+          BOOT_SIZE=256
+          dd if=/dev/zero of=final.img bs=1M count="$IMG_SIZE"
           sudo parted final.img --script mklabel msdos
-          sudo parted final.img --script mkpart primary fat32 1 100
-          sudo parted final.img --script mkpart primary ext4 100 100%
+          sudo parted final.img --script mkpart primary fat32 1 "$BOOT_SIZE"
+          sudo parted final.img --script mkpart primary ext4 "$BOOT_SIZE" 100%
           LOOP_DEV=$(sudo losetup -fP --show final.img)
           sudo partprobe "$LOOP_DEV" || true
           sleep 2
@@ -132,8 +149,8 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt
           sudo mkdir -p /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt2
-          # 使用 -r 而不是 -a，避免在 FAT32 上保留权限时出错
-          sudo cp -r boot_contents/* /mnt/
+          # 复制时使用 -rL 以处理符号链接和目录
+          sudo cp -rL boot_contents/* /mnt/
           sudo tar -xzf "${{ env.rootfs_file }}" -C /mnt2
           sync
           echo "loop_dev=$LOOP_DEV" >> $GITHUB_ENV
