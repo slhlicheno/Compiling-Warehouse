@@ -92,7 +92,7 @@ jobs:
           echo "trunk_image=$TRUNK_NAME" >> $GITHUB_ENV
           echo "rootfs_file=$ROOTFS_NAME" >> $GITHUB_ENV
 
-      - name: 提取 trunk 中的 boot 文件
+      - name: 提取并清理 trunk 中的 boot 文件
         run: |
           TRUNK_IMAGE="${{ env.trunk_image }}"
           gzip -d "$TRUNK_IMAGE"
@@ -102,39 +102,26 @@ jobs:
           sleep 2
           sudo mount "${LOOP_DEV}p1" /mnt
           mkdir -p boot_contents
+          sudo cp -a /mnt/* boot_contents/
           
-          # 只复制真正的启动文件，跳过不必要的系统目录和符号链接
-          for item in /mnt/*; do
-            base=$(basename "$item")
-            case "$base" in
-              bin|dev|etc|home|lib|lib64|media|mnt|opt|proc|root|run|sbin|selinux|srv|sys|tmp|usr|var|lost+found|.Spotlight-V100|.Trashes|.fseventsd)
-                echo "跳过系统目录: $base"
-                ;;
-              *)
-                # 如果是符号链接且指向的是跳过目录内的文件，也跳过
-                if [ -L "$item" ]; then
-                  link_target=$(readlink "$item")
-                  case "$link_target" in
-                    /bin/*|/dev/*|/etc/*|/lib/*|/lib64/*|/proc/*|/run/*|/sbin/*|/sys/*|/usr/*|/var/*)
-                      echo "跳过无效符号链接: $base -> $link_target"
-                      ;;
-                    *)
-                      # 跟随链接复制实际文件内容
-                      cp -rL "$item" boot_contents/ 2>/dev/null || echo "跳过无法复制的链接: $base"
-                      ;;
-                  esac
-                else
-                  cp -rL "$item" boot_contents/ 2>/dev/null || echo "跳过: $base"
-                fi
-                ;;
-            esac
-          done
+          # 删除所有旧内核文件，腾出空间（后续会由新内核包重新提供）
+          echo "正在清理旧内核文件..."
+          find boot_contents -maxdepth 1 -type f -name "vmlinuz-*" -delete
+          find boot_contents -maxdepth 1 -type f -name "System.map-*" -delete
+          find boot_contents -maxdepth 1 -type f -name "config-*" -delete
+          find boot_contents -maxdepth 1 -type f -name "uInitrd-*" -delete
+          find boot_contents -maxdepth 1 -type f -name "initrd.img-*" -delete
+          # 删除软链接 vmlinuz, vmlinuz.old, initrd.img, uInitrd（它们指向被删的文件）
+          find boot_contents -maxdepth 1 -type l -name "vmlinuz*" -delete
+          find boot_contents -maxdepth 1 -type l -name "initrd*" -delete
+          find boot_contents -maxdepth 1 -type l -name "uInitrd*" -delete
+          echo "✅ 旧内核文件已清理"
+          
           sudo umount /mnt
           sudo losetup -d "$LOOP_DEV"
 
       - name: 创建完整镜像并分区
         run: |
-          # 镜像大小改为 4GB，boot 分区 256MB
           IMG_SIZE=4096
           BOOT_SIZE=256
           dd if=/dev/zero of=final.img bs=1M count="$IMG_SIZE"
@@ -149,8 +136,8 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt
           sudo mkdir -p /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt2
-          # 复制时使用 -rL 以处理符号链接和目录
-          sudo cp -rL boot_contents/* /mnt/
+          # 复制时跳过可能残留的文件，并跟随链接
+          rsync -rL --exclude='vmlinuz*' --exclude='System.map*' --exclude='config-*' --exclude='uInitrd*' --exclude='initrd*' boot_contents/ /mnt/
           sudo tar -xzf "${{ env.rootfs_file }}" -C /mnt2
           sync
           echo "loop_dev=$LOOP_DEV" >> $GITHUB_ENV
