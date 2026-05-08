@@ -61,6 +61,7 @@ jobs:
       - name: 初始化环境
         run: sudo apt-get update && sudo apt-get install -y xz-utils jq curl wget
 
+      # ========== 1. 从你的 Release 下载 trunk 和 rootfs ==========
       - name: 下载自建基础镜像
         id: download
         run: |
@@ -69,10 +70,12 @@ jobs:
           API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
           ASSETS_JSON=$(curl -s -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "$API_URL" | jq '.assets')
 
+          # 查找 trunk 镜像
           TRUNK=$(echo "$ASSETS_JSON" | jq -r --arg REL "$RELEASE" 'map(select(.name | contains("-trunk") and contains($REL) and endswith(".img.gz"))) | sort_by(.updated_at) | reverse | .[0]')
           TRUNK_URL=$(echo "$TRUNK" | jq -r '.url')
           TRUNK_NAME=$(echo "$TRUNK" | jq -r '.name')
 
+          # 查找 rootfs
           ROOTFS=$(echo "$ASSETS_JSON" | jq -r --arg REL "$RELEASE" 'map(select(.name | contains("rootfs") and contains($REL) and (contains("docker") | not) and endswith(".tar.gz"))) | .[0]')
           ROOTFS_URL=$(echo "$ROOTFS" | jq -r '.url')
           ROOTFS_NAME=$(echo "$ROOTFS" | jq -r '.name')
@@ -92,7 +95,7 @@ jobs:
           echo "trunk_image=$TRUNK_NAME" >> $GITHUB_ENV
           echo "rootfs_file=$ROOTFS_NAME" >> $GITHUB_ENV
 
-      # ---------- 关键：精准提取，只取我们需要的 ----------
+      # ========== 2. 提取并清理 trunk 中的 boot 文件 ==========
       - name: 提取 trunk 中的 boot 文件
         run: |
           TRUNK_IMAGE="${{ env.trunk_image }}"
@@ -103,10 +106,10 @@ jobs:
           sleep 2
           sudo mount "${LOOP_DEV}p1" /mnt
 
-          # 创建一个干净的临时目录
-          rm -rf clean_boot && mkdir -p clean_boot
+          # 创建干净的 boot 目录
+          rm -rf clean_boot && mkdir clean_boot
 
-          # 显式列出需要保留的文件/目录列表
+          # 预定义要保留的文件前缀/目录列表
           keep_list=(
             "armbianEnv.txt"
             "boot.ini"
@@ -122,21 +125,32 @@ jobs:
             "Image"
           )
 
-          # 只复制列表里的文件和目录
+          # 复制保留项
           for item in "${keep_list[@]}"; do
+            # 使用 glob 匹配 /mnt/ 下的文件
             for match in /mnt/$item; do
               if [ -e "$match" ] || [ -L "$match" ]; then
                 cp -a "$match" clean_boot/ 2>/dev/null || true
-                echo "已保留: $(basename "$match")"
+                echo "✅ 保留: $(basename "$match")"
               fi
             done
           done
 
-          # 清理干净
+          # 卸载 trunk 镜像
           sudo umount /mnt
           sudo losetup -d "$LOOP_DEV"
 
-      # ---------- 制作完整镜像 ----------
+          # 进入 clean_boot 删除任何残留的旧内核文件和无效软链接
+          cd clean_boot
+          sudo rm -f vmlinuz-* System.map-* config-* uInitrd-* initrd.img-* 2>/dev/null
+          sudo find . -type l ! -exec test -e {} \; -delete 2>/dev/null
+          sudo find . -type d -empty -delete 2>/dev/null || true
+          cd ..
+
+          echo "✅ 最终 boot 目录内容:"
+          ls -la clean_boot/
+
+      # ========== 3. 制作完整镜像并分区 ==========
       - name: 创建完整镜像并分区
         run: |
           IMG_SIZE=4096
@@ -154,12 +168,14 @@ jobs:
           sudo mkdir -p /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt2
 
-          # 复制干净的 boot 内容（不保留特殊权限）
+          # 复制干净的 boot 文件
           sudo cp -r clean_boot/* /mnt/
+          # 解压 rootfs
           sudo tar -xzf "${{ env.rootfs_file }}" -C /mnt2
           sync
           echo "loop_dev=$LOOP_DEV" >> $GITHUB_ENV
 
+      # ========== 4. 下载并替换内核 ==========
       - name: 下载并替换内核
         id: kernel
         run: |
@@ -187,6 +203,7 @@ jobs:
             [ -n "$INITRD" ] && sudo ln -sf $(basename "$INITRD") /mnt/uInitrd
           fi
 
+      # ========== 5. 注入自定义 DTB + 启动配置 ==========
       - name: 注入 DTB 并配置启动
         run: |
           BOARD="${{ inputs.armbian_board }}"
@@ -225,6 +242,7 @@ jobs:
             sudo cp "$EXTLINUX_CONF" "$EXTLINUX_BAK"
           fi
 
+      # ========== 6. 卸载并压缩 ==========
       - name: 卸载并压缩最终镜像
         run: |
           sudo umount /mnt2
@@ -233,6 +251,7 @@ jobs:
           xz -T0 final.img
           echo "packaged_image=final.img.xz" >> $GITHUB_ENV
 
+      # ========== 7. 上传 ==========
       - name: 上传到 Release
         uses: ncipollo/release-action@main
         with:
@@ -244,8 +263,5 @@ jobs:
           makeLatest: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 自定义 Armbiab（自建基础镜像）
-            - 系统: ${{ inputs.armbian_release }}
-            - 设备: ${{ inputs.armbian_board }}
-            - 内核: ${{ inputs.armbian_kernel }}
-            - DTB: ${{ inputs.armbian_board }}.dtb
+            📦 自定义 Armbian（自建基础镜像）
+            - 系统: ${{ inputs
