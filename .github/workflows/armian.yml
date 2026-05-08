@@ -102,7 +102,19 @@ jobs:
           sleep 2
           sudo mount "${LOOP_DEV}p1" /mnt
           mkdir -p boot_contents
-          sudo cp -a /mnt/* boot_contents/
+          
+          # 只复制真正的启动文件，跳过不必要的系统目录
+          for item in /mnt/*; do
+            base=$(basename "$item")
+            case "$base" in
+              bin|dev|etc|home|lib|lib64|media|mnt|opt|proc|root|run|sbin|selinux|srv|sys|tmp|usr|var|lost+found|.Spotlight-V100|.Trashes|.fseventsd)
+                echo "跳过系统目录: $base"
+                ;;
+              *)
+                sudo cp -a "$item" boot_contents/
+                ;;
+            esac
+          done
           sudo umount /mnt
           sudo losetup -d "$LOOP_DEV"
 
@@ -120,11 +132,12 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt
           sudo mkdir -p /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt2
-          sudo cp -a boot_contents/* /mnt/
+          # 使用 -r 而不是 -a，避免在 FAT32 上保留权限时出错
+          sudo cp -r boot_contents/* /mnt/
           sudo tar -xzf "${{ env.rootfs_file }}" -C /mnt2
           sync
           echo "loop_dev=$LOOP_DEV" >> $GITHUB_ENV
-      
+
       - name: 下载并替换内核
         id: kernel
         run: |
