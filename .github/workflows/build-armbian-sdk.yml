@@ -43,49 +43,37 @@ jobs:
             qemu-user-static debootstrap binfmt-support \
             build-essential flex bison libssl-dev bc
 
-      - name: 克隆 Armbian 官方构建框架
-        run: git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
-
-      - name: 把自定义板级配置和 DTB 复制到 SDK
+      - name: 克隆并配置 Armbian 构建框架，然后编译
         run: |
-          BOARD="${{ inputs.armbian_board }}"
-          echo "目标设备: ${BOARD}"
+          # 克隆官方框架
+          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
 
-          # 1. 检查本地板级配置文件
-          if [ ! -f "config/boards/${BOARD}.wip" ]; then
-            echo "❌ 在仓库中找不到 config/boards/${BOARD}.wip，请先创建该文件！"
-            exit 1
-          fi
-
-          # 2. 在 SDK 内创建所需目录
+          # 创建用户自定义目录
           mkdir -p armbian-build/config/boards
           mkdir -p armbian-build/userpatches/overlay
 
-          # 3. 复制板级配置
-          cp "config/boards/${BOARD}.wip" "armbian-build/config/boards/"
-          echo "✅ 已复制板级配置文件"
+          # 复制板级配置
+          if [ ! -f "config/boards/${{ inputs.armbian_board }}.wip" ]; then
+            echo "❌ 在仓库中找不到板级配置文件，请重新创建并上传。"
+            exit 1
+          fi
+          cp "config/boards/${{ inputs.armbian_board }}.wip" "armbian-build/config/boards/"
 
-          # 4. 复制整个 userpatches/overlay 到 SDK 内
+          # 复制全部 overlay 内容
           if [ -d "userpatches/overlay" ]; then
             cp -r userpatches/overlay/* "armbian-build/userpatches/overlay/"
-            echo "✅ 已复制 userpatches/overlay 全部内容"
-          else
-            echo "⚠️ 未找到 userpatches/overlay，将使用 SDK 默认 DTB"
           fi
 
-          # 5. 验证复制结果
-          echo "----------- SDK 内板级配置内容 -----------"
-          cat "armbian-build/config/boards/${BOARD}.wip"
-          echo "----------------------------------------"
-          echo "SDK 内自定义 DTB 文件："
-          find armbian-build/userpatches/overlay -type f 2>/dev/null || echo "（无）"
+          # 验证复制结果
+          echo "板级配置内容："
+          cat "armbian-build/config/boards/${{ inputs.armbian_board }}.wip"
+          echo "自定义 DTB 文件："
+          find armbian-build/userpatches/overlay -type f
 
-      - name: 编译最小化镜像
-        run: |
+          # 开始编译
           cd armbian-build
           chmod +x compile.sh
-          # 核心修复：用 ALLOW_ROOT=yes 让脚本以 root 身份安心构建
-          ALLOW_ROOT=yes ./compile.sh \
+          PREFER_DOCKER=no ./compile.sh \
             BOARD=${{ inputs.armbian_board }}.wip \
             BRANCH=current \
             RELEASE=${{ inputs.armbian_release }} \
@@ -95,10 +83,9 @@ jobs:
             BUILD_DESKTOP=no \
             KERNEL_CONFIGURE=no \
             FORCE_BOOTSCRIPT_UPDATE=nope \
-            USE_CCACHE=yes \
-            docker=no
+            USE_CCACHE=yes
 
-      - name: 收集镜像并上传到 Release
+      - name: 收集并上传镜像
         run: |
           mkdir -p output-final
           cp armbian-build/output/images/*.img.xz output-final/ 2>/dev/null || true
