@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       armbian_board:
-        description: "目标设备型号"
+        description: "目标设备型号（需与 .wip 文件名一致）"
         required: true
         type: choice
         default: "s905x-p212"
@@ -49,23 +49,42 @@ jobs:
       - name: 把自定义板级配置和 DTB 复制到 SDK
         run: |
           BOARD="${{ inputs.armbian_board }}"
+          echo "目标设备: ${BOARD}"
+
+          # 1. 检查本地板级配置文件
           if [ ! -f "config/boards/${BOARD}.wip" ]; then
-            echo "❌ 在仓库中找不到 config/boards/${BOARD}.wip" && exit 1
+            echo "❌ 在仓库中找不到 config/boards/${BOARD}.wip，请先创建该文件！"
+            exit 1
           fi
+
+          # 2. 在 SDK 内创建所需目录（用户板级配置目录和 overlay 目录）
           mkdir -p armbian-build/config/boards
+          mkdir -p armbian-build/userpatches/overlay
+
+          # 3. 复制板级配置
           cp "config/boards/${BOARD}.wip" "armbian-build/config/boards/"
           echo "✅ 已复制板级配置文件"
+
+          # 4. 复制整个 userpatches/overlay 到 SDK 内
           if [ -d "userpatches/overlay" ]; then
-            cp -r userpatches/overlay/* armbian-build/userpatches/overlay/
-            echo "✅ 已复制 userpatches/overlay"
+            cp -r userpatches/overlay/* "armbian-build/userpatches/overlay/"
+            echo "✅ 已复制 userpatches/overlay 全部内容"
+          else
+            echo "⚠️ 未找到 userpatches/overlay，将使用 SDK 默认 DTB"
           fi
-          # 验证
-          echo "板级配置内容："
+
+          # 5. 验证复制结果
+          echo "----------- SDK 内板级配置内容 -----------"
           cat "armbian-build/config/boards/${BOARD}.wip"
+          echo "----------------------------------------"
+          echo "SDK 内自定义 DTB 文件："
+          find armbian-build/userpatches/overlay -type f 2>/dev/null || echo "（无）"
 
       - name: 编译最小化镜像
         run: |
           cd armbian-build
+          # 确保脚本有执行权限
+          chmod +x compile.sh
           sudo ./compile.sh \
             BOARD=${{ inputs.armbian_board }}.wip \
             BRANCH=current \
@@ -79,7 +98,7 @@ jobs:
             USE_CCACHE=yes \
             docker=no
 
-      - name: 收集镜像
+      - name: 收集镜像并上传到 Release
         run: |
           mkdir -p output-final
           cp armbian-build/output/images/*.img.xz output-final/ 2>/dev/null || true
