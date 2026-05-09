@@ -45,7 +45,6 @@ jobs:
             echo "✅ 自定义 DTB 已复制"
           fi
 
-          # ---------- 关键：自动从 uboot/ 复制到 overlay/boot/ ----------
           if [ -d "uboot" ] && [ "$(ls -A uboot 2>/dev/null)" ]; then
             echo "✅ 发现 uboot/ 目录，复制预编译 U-Boot 到 overlay/boot/"
             mkdir -p armbian-sdk/userpatches/overlay/boot
@@ -56,6 +55,22 @@ jobs:
 
           echo "板级配置内容："
           cat armbian-sdk/config/boards/s905x-p212.wip
+
+      - name: 强制跳过 U-Boot 编译（修改 SDK 源码）
+        run: |
+          # 在 artifacts-obtain.sh 中注入自定义函数，检测到 SKIP_UBOOT_BUILD 时直接返回
+          sed -i '/^function obtain_complete_artifact()/a \
+            # 检查板级配置中是否设置了 SKIP_UBOOT_BUILD\
+            if [[ "${SKIP_UBOOT_BUILD}" == "yes" ]] && [[ "${artifact}" == "uboot" ]]; then\
+              echo ">> 板级配置要求跳过 U-Boot 构建，直接使用预编译文件"\
+              return 0\
+            fi' armbian-sdk/lib/functions/artifacts/artifacts-obtain.sh
+
+          # 将 SKIP_UBOOT_BUILD 追加到 .wip 文件中
+          echo "SKIP_UBOOT_BUILD=yes" >> armbian-sdk/config/boards/s905x-p212.wip
+
+          echo "修改后的 artifacts-obtain.sh 相关函数："
+          grep -A 5 "function obtain_complete_artifact()" armbian-sdk/lib/functions/artifacts/artifacts-obtain.sh || true
 
       - name: 配置宿主机的 QEMU 支持（智能注册，避免重复）
         run: |
@@ -80,8 +95,6 @@ jobs:
             -v "$PWD/armbian-sdk":/armbian \
             -v "$PWD/output":/armbian/output \
             -e ALLOW_ROOT=yes \
-            -e SKIP_UBOOT=true \
-            -e SKIP_BOOT_SOURCE=yes \
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
               cd /armbian
