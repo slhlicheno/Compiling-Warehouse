@@ -1,4 +1,4 @@
-name: Build Armbian (SDK via Manual Docker)
+name: Build Armbian (SDK + 自定义 U-Boot/DTB)
 
 on:
   workflow_dispatch:
@@ -32,36 +32,42 @@ jobs:
       - name: 拉取 Armbian 官方构建镜像
         run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
-      - name: 准备完整的构建环境
+      - name: 准备完整的构建环境（整合自定义 U-Boot 和 DTB）
         run: |
+          # 克隆官方构建框架
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
+
+          # 创建板级配置目录并复制你的 .wip 文件
           mkdir -p armbian-sdk/config/boards
-          mkdir -p armbian-sdk/userpatches/overlay
           cp config/boards/s905x-p212.wip armbian-sdk/config/boards/
+
+          # 创建 overlay 目录
+          mkdir -p armbian-sdk/userpatches/overlay
+
+          # 复制你的 DTB 文件（保留目录结构）
           if [ -d "userpatches/overlay" ]; then
             cp -r userpatches/overlay/* armbian-sdk/userpatches/overlay/
-          fi
-          echo "✅ 构建环境已准备完毕"
-          echo "板级配置："
-          cat armbian-sdk/config/boards/s905x-p212.wip
-          echo "自定义文件列表："
-          find armbian-sdk/userpatches -type f || true
-
-      - name: 配置宿主机的 QEMU 支持（智能注册，避免重复）
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-          sudo modprobe binfmt_misc 2>/dev/null || true
-          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
-          if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-            echo "✅ ARM64 binfmt 已注册，跳过注册。"
-            cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+            echo "✅ 自定义 DTB 已复制"
           else
-            echo "注册 ARM64 binfmt..."
-            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register || echo "注册失败，但继续编译"
+            echo "⚠️ 未找到 userpatches/overlay 目录，将使用 SDK 默认 DTB"
           fi
-          echo "已注册的 binfmt 条目："
-          ls /proc/sys/fs/binfmt_misc/ 2>/dev/null || echo "无法列出条目，但可能仍然可用"
+
+          # 处理自定义 U-Boot：放入 overlay/usr/lib/u-boot，并追加 SKIP_BOOT_SOURCE 跳过编译
+          if [ -d "uboot" ] && [ "$(ls -A uboot 2>/dev/null)" ]; then
+            echo "✅ 发现自定义 U-Boot 文件，将在构建中使用它们"
+            mkdir -p armbian-sdk/userpatches/overlay/usr/lib/u-boot
+            cp -a uboot/* armbian-sdk/userpatches/overlay/usr/lib/u-boot/
+            # 在板级配置中添加跳过 U-Boot 编译的标志
+            echo "SKIP_BOOT_SOURCE=yes" >> armbian-sdk/config/boards/s905x-p212.wip
+            echo "✅ 已设置跳过 U-Boot 编译"
+          else
+            echo "ℹ️ 未提供自定义 U-Boot，将使用 SDK 默认行为（可能编译 U-Boot）"
+          fi
+
+          echo "板级配置文件最终内容："
+          cat armbian-sdk/config/boards/s905x-p212.wip
+          echo "overlay 目录结构："
+          find armbian-sdk/userpatches/overlay -type f || true
 
       - name: 在 Docker 容器内编译
         run: |
@@ -73,12 +79,7 @@ jobs:
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
               cd /armbian
-              ls -l compile.sh
-              if arch-test arm64; then
-                echo '>> ARM64 交叉编译支持：OK'
-              else
-                echo '>> ARM64 交叉编译支持：未检测到，但继续尝试'
-              fi
+              echo '>> 开始编译...'
               ./compile.sh \
                 BOARD=s905x-p212 \
                 BRANCH=current \
@@ -93,7 +94,7 @@ jobs:
                 docker=no
             "
 
-      - name: 收集镜像
+      - name: 收集镜像并上传到 Release
         run: |
           mkdir -p output-final
           cp output/images/*.img.xz output-final/ 2>/dev/null || true
@@ -107,6 +108,6 @@ jobs:
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 Armbian 官方 SDK 构建 (手动 Docker)
+            📦 Armbian 官方 SDK 构建 (自定义 U-Boot + DTB)
             - 内核: unifreq/linux-${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
