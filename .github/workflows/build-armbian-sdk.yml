@@ -35,17 +35,13 @@ jobs:
 
       - name: 准备完整的构建环境
         run: |
-          # 克隆官方构建框架到 armbian-sdk
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
-          
-          # 将你的自定义配置和 overlay 放进去
           mkdir -p armbian-sdk/config/boards
+          mkdir -p armbian-sdk/userpatches/overlay
           cp config/boards/s905x-p212.wip armbian-sdk/config/boards/
-          
           if [ -d "userpatches/overlay" ]; then
             cp -r userpatches/overlay/* armbian-sdk/userpatches/overlay/
           fi
-          
           echo "✅ 构建环境已准备完毕"
           echo "板级配置："
           cat armbian-sdk/config/boards/s905x-p212.wip
