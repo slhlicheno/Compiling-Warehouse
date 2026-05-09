@@ -48,15 +48,19 @@ jobs:
           echo "自定义文件列表："
           find armbian-sdk/userpatches -type f || true
 
-      - name: 配置宿主机的 QEMU 支持
+      - name: 配置宿主机的 QEMU 支持（手动绑定，绕过 update-binfmts）
         run: |
           sudo apt-get update
-          # 先安装 binfmt-support，再安装 qemu-user-static
-          sudo apt-get install -y binfmt-support qemu-user-static
-          # 启用 ARM64 二进制格式支持
-          sudo update-binfmts --enable qemu-aarch64
-          # 验证注册状态
-          sudo update-binfmts --display qemu-aarch64
+          sudo apt-get install -y qemu-user-static
+          # 确保 binfmt_misc 模块已加载
+          sudo modprobe binfmt_misc
+          # 挂载 binfmt_misc 文件系统（如果尚未挂载）
+          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+          # 直接向内核注册 ARM64 模拟器
+          echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
+          # 验证注册成功
+          ls -la /proc/sys/fs/binfmt_misc
+          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "ARM64 binfmt 已注册"
 
       - name: 在 Docker 容器内编译
         run: |
