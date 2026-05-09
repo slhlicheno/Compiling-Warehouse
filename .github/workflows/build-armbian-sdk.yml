@@ -1,4 +1,4 @@
-name: Build Armbian (SDK + 强制跳过U-Boot编译)
+name: Build Armbian (最终SDK方案-动态覆盖函数)
 
 on:
   workflow_dispatch:
@@ -45,22 +45,14 @@ jobs:
             echo "✅ 自定义 DTB 已复制"
           fi
 
-          # 把你的预编译 U-Boot 文件放到一个固定的临时目录
+          # 把你的预编译 U-Boot 文件放入固定临时目录
           mkdir -p armbian-sdk/.tmp/uboot_prebuilt
           if [ -d "uboot" ] && [ "$(ls -A uboot 2>/dev/null)" ]; then
             cp -a uboot/* armbian-sdk/.tmp/uboot_prebuilt/
-            echo "✅ 预编译 U-Boot 文件已复制到临时目录"
+            echo "✅ 预编译 U-Boot 文件已就位"
           else
-            echo "⚠️ 未提供 uboot/ 目录，将使用 SDK 默认行为"
+            echo "⚠️ 未提供 uboot/ 目录，可能仍会编译 U-Boot"
           fi
-
-          # 关键修改：直接替换 compile_uboot_target 函数
-          sed -i '/^function compile_uboot_target()/{
-          s/^function compile_uboot_target()/function compile_uboot_target() { echo ">> 跳过 U-Boot 编译，直接使用预编译文件"; mkdir -p $uboottempdir\/usr\/lib\/$uboot_name; cp -a \/armbian\/.tmp\/uboot_prebuilt\/* $uboottempdir\/usr\/lib\/$uboot_name\/; return 0; } ; function compile_uboot_target_original/
-          }' armbian-sdk/lib/functions/compilation/uboot.sh
-
-          echo "修改后的 compile_uboot_target 函数："
-          grep -A 4 "function compile_uboot_target()" armbian-sdk/lib/functions/compilation/uboot.sh || true
 
       - name: 配置宿主机的 QEMU 支持
         run: |
@@ -69,14 +61,12 @@ jobs:
           sudo modprobe binfmt_misc 2>/dev/null || true
           sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
           if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-            echo "✅ ARM64 binfmt 已注册，跳过注册。"
-            cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+            echo "✅ ARM64 binfmt 已注册"
           else
-            echo "注册 ARM64 binfmt..."
-            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register || echo "注册失败，但继续编译"
+            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
           fi
 
-      - name: 在 Docker 容器内编译
+      - name: 在 Docker 容器内编译（动态跳过 U-Boot 编译）
         run: |
           mkdir -p output
           docker run --rm --privileged \
@@ -84,9 +74,19 @@ jobs:
             -v "$PWD/output":/armbian/output \
             -e ALLOW_ROOT=yes \
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
-            /bin/bash -c "
+            /bin/bash -c '
               cd /armbian
-              echo '>> 开始编译...'
+              # 定义一个新的 compile_uboot_target 函数，直接使用预编译文件
+              eval "
+              compile_uboot_target() {
+                echo \">> 跳过 U-Boot 编译，使用自定义预编译文件\"
+                mkdir -p \$uboottempdir/usr/lib/\$uboot_name
+                cp -a /armbian/.tmp/uboot_prebuilt/* \$uboottempdir/usr/lib/\$uboot_name/
+                return 0
+              }
+              "
+              export -f compile_uboot_target
+              echo ">> 已注入自定义 compile_uboot_target 函数，开始编译..."
               ./compile.sh \
                 BOARD=s905x-p212 \
                 BRANCH=current \
@@ -99,7 +99,7 @@ jobs:
                 FORCE_BOOTSCRIPT_UPDATE=nope \
                 USE_CCACHE=yes \
                 docker=no
-            "
+            '
 
       - name: 收集镜像并上传到 Release
         run: |
@@ -115,6 +115,6 @@ jobs:
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 Armbian 官方 SDK 构建 (强制跳过U-Boot编译)
+            📦 Armbian 官方 SDK 构建 (最终方案-动态覆盖函数)
             - 内核: unifreq/linux-${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
