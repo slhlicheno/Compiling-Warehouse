@@ -64,7 +64,7 @@ jobs:
               ls -l compile.sh
               echo '>> 开始编译...'
               ./compile.sh \
-                BOARD=s905x-p212.wip \
+                BOARD=s905x-p212 \
                 BRANCH=current \
                 RELEASE=${{ inputs.armbian_release }} \
                 KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
