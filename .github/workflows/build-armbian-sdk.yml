@@ -1,4 +1,4 @@
-name: Build Armbian (SDK + 自定义 U-Boot/DTB)_Final
+name: Build Armbian (SDK + 预编译U-Boot/DTB)
 
 on:
   workflow_dispatch:
@@ -32,7 +32,7 @@ jobs:
       - name: 拉取 Armbian 官方构建镜像
         run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
-      - name: 准备完整的构建环境（整合自定义 U-Boot 和 DTB）
+      - name: 准备完整的构建环境（自动处理 uboot/ 目录）
         run: |
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
 
@@ -45,14 +45,16 @@ jobs:
             echo "✅ 自定义 DTB 已复制"
           fi
 
+          # ---------- 关键：自动从 uboot/ 复制到 overlay/boot/ ----------
           if [ -d "uboot" ] && [ "$(ls -A uboot 2>/dev/null)" ]; then
-            echo "✅ 发现自定义 U-Boot 文件，将在构建中使用它们"
-            mkdir -p armbian-sdk/userpatches/overlay/usr/lib/u-boot
-            cp -a uboot/* armbian-sdk/userpatches/overlay/usr/lib/u-boot/
-            echo "SKIP_BOOT_SOURCE=yes" >> armbian-sdk/config/boards/s905x-p212.wip
+            echo "✅ 发现 uboot/ 目录，复制预编译 U-Boot 到 overlay/boot/"
+            mkdir -p armbian-sdk/userpatches/overlay/boot
+            cp -a uboot/* armbian-sdk/userpatches/overlay/boot/
+          else
+            echo "⚠️ 未提供 uboot/ 目录，将使用 SDK 默认行为"
           fi
 
-          echo "板级配置文件最终内容："
+          echo "板级配置内容："
           cat armbian-sdk/config/boards/s905x-p212.wip
 
       - name: 配置宿主机的 QEMU 支持（智能注册，避免重复）
@@ -78,6 +80,8 @@ jobs:
             -v "$PWD/armbian-sdk":/armbian \
             -v "$PWD/output":/armbian/output \
             -e ALLOW_ROOT=yes \
+            -e SKIP_UBOOT=true \
+            -e SKIP_BOOT_SOURCE=yes \
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
               cd /armbian
@@ -110,6 +114,6 @@ jobs:
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 Armbian 官方 SDK 构建 (智能QEMU + 自定义 U-Boot/DTB)
+            📦 Armbian 官方 SDK 构建 (预编译U-Boot + 自定义DTB)
             - 内核: unifreq/linux-${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
