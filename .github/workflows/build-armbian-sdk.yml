@@ -7,17 +7,15 @@ on:
         description: "目标设备型号"
         required: true
         type: choice
-        default: "s905lb-r3300l"
+        default: "s905x-p212"
         options:
-          - s905lb-r3300l
-          - rk3568-dg-tn3568
           - s905x-p212
-          # 以后新增设备在这里添加即可
+          # 添加更多设备时在下面继续加
       armbian_release:
         description: "系统版本"
         required: true
         type: choice
-        default: "bookworm"
+        default: "trixie"
         options:
           - bookworm
           - trixie
@@ -36,36 +34,50 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: 检出你的仓库（含自定义配置和 DTB）
+      - name: 检出你的仓库（含 config 和 userpatches）
         uses: actions/checkout@v4
 
       - name: 安装构建依赖
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y git wget curl xz-utils
+        run: sudo apt-get update && sudo apt-get install -y git wget curl xz-utils
 
       - name: 克隆 Armbian 官方构建框架
-        run: |
-          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
+        run: git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
 
-      - name: 根据选择的设备，把对应的板级配置和 DTB 链接到框架内
+      - name: 把自定义板级配置和 DTB 复制到 SDK
         run: |
-          mkdir -p armbian-build/config/boards
-          mkdir -p armbian-build/userpatches/overlay/boot/dtb
+          BOARD="${{ inputs.armbian_board }}"
+          echo "目标设备: ${BOARD}"
 
-          # 设备型号 -> 板级配置文件名 的映射
-          # 规则：以设备型号为名创建 .wip 文件，例如 s905lb-r3300l.wip
-          BOARD_CONFIG="${{ inputs.armbian_board }}.wip"
-          if [ ! -f "config/boards/${BOARD_CONFIG}" ]; then
-            echo "❌ 找不到板级配置文件: config/boards/${BOARD_CONFIG}"
+          # 1. 检查本地配置文件
+          if [ ! -f "config/boards/${BOARD}.wip" ]; then
+            echo "❌ 在仓库中找不到 config/boards/${BOARD}.wip，请先创建该文件！"
             exit 1
           fi
-          cp "config/boards/${BOARD_CONFIG}" armbian-build/config/boards/
 
-          # 复制对应的 DTB 文件
-          # 假设 DTB 放在 userpatches/overlay/boot/dtb/ 下，文件名与设备型号相同
-          # 平台子目录（amlogic / rockchip）已在本地仓库中预创建
-          cp -r userpatches/overlay/* armbian-build/userpatches/overlay/
+          # 2. 在 SDK 内创建所需目录
+          mkdir -p armbian-build/config/boards
+          mkdir -p armbian-build/userpatches/overlay
+
+          # 3. 复制板级配置
+          cp "config/boards/${BOARD}.wip" "armbian-build/config/boards/"
+          echo "✅ 已复制板级配置文件"
+
+          # 4. 复制整个 userpatches/overlay（包含 dtb/下所有文件及目录结构）
+          if [ -d "userpatches/overlay" ]; then
+            cp -r userpatches/overlay/* armbian-build/userpatches/overlay/
+            echo "✅ 已复制 userpatches/overlay 全部内容"
+          else
+            echo "⚠️ 未找到 userpatches/overlay，将使用 SDK 默认 DTB"
+          fi
+
+          # 5. 验证复制结果
+          echo "验证 SDK 内的板级配置："
+          ls -l "armbian-build/config/boards/${BOARD}.wip"
+          echo "----------------------------------------"
+          cat "armbian-build/config/boards/${BOARD}.wip"
+          echo "----------------------------------------"
+          echo "验证 SDK 内的 DTB 文件（如果存在）："
+          find armbian-build/userpatches/overlay -name "*.dtb" || echo "（无自定义 DTB）"
 
       - name: 编译最小化镜像
         run: |
