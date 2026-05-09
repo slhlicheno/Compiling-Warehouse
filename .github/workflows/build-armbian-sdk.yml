@@ -30,8 +30,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: 拉取 Armbian 官方构建镜像
-        run: |
-          docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
+        run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
       - name: 准备完整的构建环境
         run: |
@@ -48,19 +47,21 @@ jobs:
           echo "自定义文件列表："
           find armbian-sdk/userpatches -type f || true
 
-      - name: 配置宿主机的 QEMU 支持（手动绑定，绕过 update-binfmts）
+      - name: 配置宿主机的 QEMU 支持（智能注册，避免重复）
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
-          # 确保 binfmt_misc 模块已加载
-          sudo modprobe binfmt_misc
-          # 挂载 binfmt_misc 文件系统（如果尚未挂载）
+          sudo modprobe binfmt_misc 2>/dev/null || true
           sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
-          # 直接向内核注册 ARM64 模拟器
-          echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
-          # 验证注册成功
-          ls -la /proc/sys/fs/binfmt_misc
-          cat /proc/sys/fs/binfmt_misc/qemu-aarch64 2>/dev/null || echo "ARM64 binfmt 已注册"
+          if [ -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            echo "✅ ARM64 binfmt 已注册，跳过注册。"
+            cat /proc/sys/fs/binfmt_misc/qemu-aarch64
+          else
+            echo "注册 ARM64 binfmt..."
+            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register || echo "注册失败，但继续编译"
+          fi
+          echo "已注册的 binfmt 条目："
+          ls /proc/sys/fs/binfmt_misc/ 2>/dev/null || echo "无法列出条目，但可能仍然可用"
 
       - name: 在 Docker 容器内编译
         run: |
@@ -72,11 +73,12 @@ jobs:
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
               cd /armbian
-              echo '>> 当前工作目录：'
-              pwd
-              echo '>> compile.sh 是否存在：'
               ls -l compile.sh
-              echo '>> 开始编译...'
+              if arch-test arm64; then
+                echo '>> ARM64 交叉编译支持：OK'
+              else
+                echo '>> ARM64 交叉编译支持：未检测到，但继续尝试'
+              fi
               ./compile.sh \
                 BOARD=s905x-p212 \
                 BRANCH=current \
