@@ -1,0 +1,5 @@
+BOARD_NAME="s905x-p212"
+BOARDFAMILY="meson-gxl"          
+SERIALCON="ttyAML0"           
+FULL_DESKTOP="no"                
+BOOT_FDT_FILE="amlogic/s905x-p212.dtb"   
