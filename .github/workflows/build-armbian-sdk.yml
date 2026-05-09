@@ -1,20 +1,13 @@
-name: Build Armbian (Official SDK Multi-Device)
+name: Build Armbian (SDK via Manual Docker)
 
 on:
   workflow_dispatch:
     inputs:
-      armbian_board:
-        description: "目标设备型号（需与 .wip 文件名一致）"
-        required: true
-        type: choice
-        default: "s905x-p212"
-        options:
-          - s905x-p212
       armbian_release:
         description: "系统版本"
         required: true
         type: choice
-        default: "trixie"
+        default: 'trixie'
         options:
           - bookworm
           - trixie
@@ -36,70 +29,65 @@ jobs:
       - name: 检出你的仓库
         uses: actions/checkout@v4
 
-      - name: 安装构建依赖
+      - name: 拉取 Armbian 官方构建镜像
         run: |
-          sudo apt-get update
-          sudo apt-get install -y git wget curl xz-utils \
-            qemu-user-static debootstrap binfmt-support \
-            build-essential flex bison libssl-dev bc
+          docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
-      - name: 克隆并配置 Armbian 构建框架，然后编译
+      - name: 准备自定义文件结构
         run: |
-          # 克隆官方框架
-          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
-
-          # 创建用户自定义目录
-          mkdir -p armbian-build/config/boards
-          mkdir -p armbian-build/userpatches/overlay
-
+          # 创建 Armbian SDK 期望的目录结构
+          mkdir -p armbian-sdk/config/boards
+          mkdir -p armbian-sdk/userpatches/overlay
           # 复制板级配置
-          if [ ! -f "config/boards/${{ inputs.armbian_board }}.wip" ]; then
-            echo "❌ 在仓库中找不到板级配置文件，请重新创建并上传。"
-            exit 1
-          fi
-          cp "config/boards/${{ inputs.armbian_board }}.wip" "armbian-build/config/boards/"
-
-          # 复制全部 overlay 内容
+          cp config/boards/s905x-p212.wip armbian-sdk/config/boards/
+          # 复制 overlay (DTB)
           if [ -d "userpatches/overlay" ]; then
-            cp -r userpatches/overlay/* "armbian-build/userpatches/overlay/"
+            cp -r userpatches/overlay/* armbian-sdk/userpatches/overlay/
           fi
+          echo "✅ 自定义文件已准备好"
 
-          # 验证复制结果
-          echo "板级配置内容："
-          cat "armbian-build/config/boards/${{ inputs.armbian_board }}.wip"
-          echo "自定义 DTB 文件："
-          find armbian-build/userpatches/overlay -type f
+      - name: 在 Docker 容器内编译
+        run: |
+          docker run --rm \
+            -v "$PWD/armbian-sdk":/armbian \
+            -v "$PWD/output":/armbian/output \
+            -e USERPATCHES_PATH="/armbian/userpatches" \
+            ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
+            /bin/bash -c "
+              set -e
+              cd /armbian
+              echo '板级配置内容：'
+              cat config/boards/s905x-p212.wip
+              echo '自定义 DTB 文件：'
+              find userpatches/overlay -type f || true
+              # 运行编译（直接调用 compile.sh，容器内是 root 用户）
+              ./compile.sh \
+                BOARD=s905x-p212.wip \
+                BRANCH=current \
+                RELEASE=${{ inputs.armbian_release }} \
+                KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
+                KERNELBRANCH=${{ inputs.kernel_branch }} \
+                BUILD_MINIMAL=yes \
+                BUILD_DESKTOP=no \
+                KERNEL_CONFIGURE=no \
+                FORCE_BOOTSCRIPT_UPDATE=nope \
+                USE_CCACHE=yes
+            "
 
-          # 开始编译
-          cd armbian-build
-          chmod +x compile.sh
-          PREFER_DOCKER=no ./compile.sh \
-            BOARD=${{ inputs.armbian_board }}.wip \
-            BRANCH=current \
-            RELEASE=${{ inputs.armbian_release }} \
-            KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
-            KERNELBRANCH=${{ inputs.kernel_branch }} \
-            BUILD_MINIMAL=yes \
-            BUILD_DESKTOP=no \
-            KERNEL_CONFIGURE=no \
-            FORCE_BOOTSCRIPT_UPDATE=nope \
-            USE_CCACHE=yes
-
-      - name: 收集并上传镜像
+      - name: 收集镜像
         run: |
           mkdir -p output-final
-          cp armbian-build/output/images/*.img.xz output-final/ 2>/dev/null || true
-          cp armbian-build/output/images/*.img.gz output-final/ 2>/dev/null || true
+          cp output/output/images/*.img.xz output-final/ 2>/dev/null || true
+          cp output/output/images/*.img.gz output-final/ 2>/dev/null || true
 
       - name: 上传到 Release
         uses: ncipollo/release-action@main
         with:
-          tag: "Armbian-SDK-${{ inputs.armbian_board }}-${{ inputs.armbian_release }}-${{ inputs.kernel_branch }}"
+          tag: "Armbian-SDK-${{ inputs.armbian_release }}-${{ inputs.kernel_branch }}"
           artifacts: "output-final/*.img.*"
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 Armbian 官方 SDK 构建
-            - 设备: ${{ inputs.armbian_board }}
+            📦 Armbian 官方 SDK 构建 (手动 Docker)
             - 内核: unifreq/linux-${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
