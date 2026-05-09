@@ -48,6 +48,15 @@ jobs:
           echo "自定义文件列表："
           find armbian-sdk/userpatches -type f || true
 
+      - name: 配置宿主机的 QEMU 支持
+        run: |
+          # 更新包列表
+          sudo apt-get update
+          # 安装 qemu-user-static，它会自动注册 binfmt
+          sudo apt-get install -y qemu-user-static
+          # 验证 ARM64 架构是否已注册
+          sudo update-binfmts --display qemu-aarch64
+
       - name: 在 Docker 容器内编译
         run: |
           mkdir -p output
