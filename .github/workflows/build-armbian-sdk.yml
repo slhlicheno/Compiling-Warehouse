@@ -10,7 +10,6 @@ on:
         default: "s905x-p212"
         options:
           - s905x-p212
-          # 添加更多设备时在下面继续加
       armbian_release:
         description: "系统版本"
         required: true
@@ -34,11 +33,15 @@ jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: 检出你的仓库（含 config 和 userpatches）
+      - name: 检出你的仓库
         uses: actions/checkout@v4
 
       - name: 安装构建依赖
-        run: sudo apt-get update && sudo apt-get install -y git wget curl xz-utils
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget curl xz-utils \
+            qemu-user-static debootstrap binfmt-support \
+            build-essential flex bison libssl-dev bc
 
       - name: 克隆 Armbian 官方构建框架
         run: git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
@@ -46,43 +49,24 @@ jobs:
       - name: 把自定义板级配置和 DTB 复制到 SDK
         run: |
           BOARD="${{ inputs.armbian_board }}"
-          echo "目标设备: ${BOARD}"
-
-          # 1. 检查本地配置文件
           if [ ! -f "config/boards/${BOARD}.wip" ]; then
-            echo "❌ 在仓库中找不到 config/boards/${BOARD}.wip，请先创建该文件！"
-            exit 1
+            echo "❌ 在仓库中找不到 config/boards/${BOARD}.wip" && exit 1
           fi
-
-          # 2. 在 SDK 内创建所需目录
           mkdir -p armbian-build/config/boards
-          mkdir -p armbian-build/userpatches/overlay
-
-          # 3. 复制板级配置
           cp "config/boards/${BOARD}.wip" "armbian-build/config/boards/"
           echo "✅ 已复制板级配置文件"
-
-          # 4. 复制整个 userpatches/overlay（包含 dtb/下所有文件及目录结构）
           if [ -d "userpatches/overlay" ]; then
             cp -r userpatches/overlay/* armbian-build/userpatches/overlay/
-            echo "✅ 已复制 userpatches/overlay 全部内容"
-          else
-            echo "⚠️ 未找到 userpatches/overlay，将使用 SDK 默认 DTB"
+            echo "✅ 已复制 userpatches/overlay"
           fi
-
-          # 5. 验证复制结果
-          echo "验证 SDK 内的板级配置："
-          ls -l "armbian-build/config/boards/${BOARD}.wip"
-          echo "----------------------------------------"
+          # 验证
+          echo "板级配置内容："
           cat "armbian-build/config/boards/${BOARD}.wip"
-          echo "----------------------------------------"
-          echo "验证 SDK 内的 DTB 文件（如果存在）："
-          find armbian-build/userpatches/overlay -name "*.dtb" || echo "（无自定义 DTB）"
 
       - name: 编译最小化镜像
         run: |
           cd armbian-build
-          ./compile.sh \
+          sudo ./compile.sh \
             BOARD=${{ inputs.armbian_board }}.wip \
             BRANCH=current \
             RELEASE=${{ inputs.armbian_release }} \
@@ -92,9 +76,10 @@ jobs:
             BUILD_DESKTOP=no \
             KERNEL_CONFIGURE=no \
             FORCE_BOOTSCRIPT_UPDATE=nope \
-            USE_CCACHE=yes
+            USE_CCACHE=yes \
+            docker=no
 
-      - name: 收集镜像并上传到 Release
+      - name: 收集镜像
         run: |
           mkdir -p output-final
           cp armbian-build/output/images/*.img.xz output-final/ 2>/dev/null || true
@@ -110,5 +95,5 @@ jobs:
           body: |
             📦 Armbian 官方 SDK 构建
             - 设备: ${{ inputs.armbian_board }}
-            - 内核源码: unifreq/linux-${{ inputs.kernel_branch }}
-            - 系统版本: ${{ inputs.armbian_release }}
+            - 内核: unifreq/linux-${{ inputs.kernel_branch }}
+            - 系统: ${{ inputs.armbian_release }}
