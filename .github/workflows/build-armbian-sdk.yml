@@ -11,6 +11,7 @@ on:
         options:
           - s905lb-r3300l
           - rk3568-dg-tn3568
+          - s905x-p212
           # 以后新增设备在这里添加即可
       armbian_release:
         description: "系统版本"
