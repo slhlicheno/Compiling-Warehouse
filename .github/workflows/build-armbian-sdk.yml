@@ -57,7 +57,7 @@ jobs:
             exit 1
           fi
 
-          # 2. 在 SDK 内创建所需目录（用户板级配置目录和 overlay 目录）
+          # 2. 在 SDK 内创建所需目录
           mkdir -p armbian-build/config/boards
           mkdir -p armbian-build/userpatches/overlay
 
@@ -83,9 +83,9 @@ jobs:
       - name: 编译最小化镜像
         run: |
           cd armbian-build
-          # 确保脚本有执行权限
           chmod +x compile.sh
-          sudo ./compile.sh \
+          # 核心修复：用 ALLOW_ROOT=yes 让脚本以 root 身份安心构建
+          ALLOW_ROOT=yes ./compile.sh \
             BOARD=${{ inputs.armbian_board }}.wip \
             BRANCH=current \
             RELEASE=${{ inputs.armbian_release }} \
