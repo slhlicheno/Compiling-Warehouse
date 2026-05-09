@@ -1,0 +1,101 @@
+name: Build Armbian (Official SDK Multi-Device)
+
+on:
+  workflow_dispatch:
+    inputs:
+      armbian_board:
+        description: "目标设备型号"
+        required: true
+        type: choice
+        default: "s905lb-r3300l"
+        options:
+          - s905lb-r3300l
+          - rk3568-dg-tn3568
+          # 以后新增设备在这里添加即可
+      armbian_release:
+        description: "系统版本"
+        required: true
+        type: choice
+        default: "bookworm"
+        options:
+          - bookworm
+          - trixie
+          - noble
+      kernel_branch:
+        description: "内核分支 (unifreq 仓库)"
+        required: true
+        type: choice
+        default: "5.15.y"
+        options:
+          - 5.15.y
+          - 6.1.y
+          - 6.6.y
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: 检出你的仓库（含自定义配置和 DTB）
+        uses: actions/checkout@v4
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git wget curl xz-utils
+
+      - name: 克隆 Armbian 官方构建框架
+        run: |
+          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-build
+
+      - name: 根据选择的设备，把对应的板级配置和 DTB 链接到框架内
+        run: |
+          mkdir -p armbian-build/config/boards
+          mkdir -p armbian-build/userpatches/overlay/boot/dtb
+
+          # 设备型号 -> 板级配置文件名 的映射
+          # 规则：以设备型号为名创建 .wip 文件，例如 s905lb-r3300l.wip
+          BOARD_CONFIG="${{ inputs.armbian_board }}.wip"
+          if [ ! -f "config/boards/${BOARD_CONFIG}" ]; then
+            echo "❌ 找不到板级配置文件: config/boards/${BOARD_CONFIG}"
+            exit 1
+          fi
+          cp "config/boards/${BOARD_CONFIG}" armbian-build/config/boards/
+
+          # 复制对应的 DTB 文件
+          # 假设 DTB 放在 userpatches/overlay/boot/dtb/ 下，文件名与设备型号相同
+          # 平台子目录（amlogic / rockchip）已在本地仓库中预创建
+          cp -r userpatches/overlay/* armbian-build/userpatches/overlay/
+
+      - name: 编译最小化镜像
+        run: |
+          cd armbian-build
+          ./compile.sh \
+            BOARD=${{ inputs.armbian_board }}.wip \
+            BRANCH=current \
+            RELEASE=${{ inputs.armbian_release }} \
+            KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
+            KERNELBRANCH=${{ inputs.kernel_branch }} \
+            BUILD_MINIMAL=yes \
+            BUILD_DESKTOP=no \
+            KERNEL_CONFIGURE=no \
+            FORCE_BOOTSCRIPT_UPDATE=nope \
+            USE_CCACHE=yes
+
+      - name: 收集镜像并上传到 Release
+        run: |
+          mkdir -p output-final
+          cp armbian-build/output/images/*.img.xz output-final/ 2>/dev/null || true
+          cp armbian-build/output/images/*.img.gz output-final/ 2>/dev/null || true
+
+      - name: 上传到 Release
+        uses: ncipollo/release-action@main
+        with:
+          tag: "Armbian-SDK-${{ inputs.armbian_board }}-${{ inputs.armbian_release }}-${{ inputs.kernel_branch }}"
+          artifacts: "output-final/*.img.*"
+          allowUpdates: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+          body: |
+            📦 Armbian 官方 SDK 构建
+            - 设备: ${{ inputs.armbian_board }}
+            - 内核源码: unifreq/linux-${{ inputs.kernel_branch }}
+            - 系统版本: ${{ inputs.armbian_release }}
