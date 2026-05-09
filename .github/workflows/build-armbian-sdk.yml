@@ -51,9 +51,10 @@ jobs:
       - name: 在 Docker 容器内编译
         run: |
           mkdir -p output
-          docker run --rm \
+          docker run --rm --privileged \
             -v "$PWD/armbian-sdk":/armbian \
             -v "$PWD/output":/armbian/output \
+            -e ALLOW_ROOT=yes \
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
               cd /armbian
