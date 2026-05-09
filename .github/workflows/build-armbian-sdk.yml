@@ -50,11 +50,12 @@ jobs:
 
       - name: 配置宿主机的 QEMU 支持
         run: |
-          # 更新包列表
           sudo apt-get update
-          # 安装 qemu-user-static，它会自动注册 binfmt
-          sudo apt-get install -y qemu-user-static
-          # 验证 ARM64 架构是否已注册
+          # 先安装 binfmt-support，再安装 qemu-user-static
+          sudo apt-get install -y binfmt-support qemu-user-static
+          # 启用 ARM64 二进制格式支持
+          sudo update-binfmts --enable qemu-aarch64
+          # 验证注册状态
           sudo update-binfmts --display qemu-aarch64
 
       - name: 在 Docker 容器内编译
