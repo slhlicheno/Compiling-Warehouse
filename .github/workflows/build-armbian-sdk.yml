@@ -1,4 +1,4 @@
-name: Build Armbian (SDK + 预编译U-Boot/DTB)
+name: Build Armbian (SDK + 强制跳过U-Boot编译)
 
 on:
   workflow_dispatch:
@@ -45,32 +45,20 @@ jobs:
             echo "✅ 自定义 DTB 已复制"
           fi
 
+          # 把预编译 U-Boot 放入源码树中的固定位置（用于后续函数直接复制）
+          mkdir -p armbian-sdk/.tmp/uboot_prebuilt
           if [ -d "uboot" ] && [ "$(ls -A uboot 2>/dev/null)" ]; then
-            echo "✅ 发现 uboot/ 目录，复制预编译 U-Boot 到 overlay/boot/"
-            mkdir -p armbian-sdk/userpatches/overlay/boot
-            cp -a uboot/* armbian-sdk/userpatches/overlay/boot/
+            echo "✅ 发现 uboot/ 目录，复制预编译 U-Boot 到临时目录"
+            cp -a uboot/* armbian-sdk/.tmp/uboot_prebuilt/
           else
             echo "⚠️ 未提供 uboot/ 目录，将使用 SDK 默认行为"
           fi
 
-          echo "板级配置内容："
-          cat armbian-sdk/config/boards/s905x-p212.wip
+          # 关键：直接覆盖 compile_uboot_target 函数，让它直接使用预编译文件
+          sed -i 's/^function compile_uboot_target()/function compile_uboot_target() { echo ">> 跳过 U-Boot 编译，直接使用预编译文件"; mkdir -p $UBOOT_PACKAGING_DIR; cp -a \/armbian\/.tmp\/uboot_prebuilt\/* $UBOOT_PACKAGING_DIR\/; return 0; } ; function compile_uboot_target_original/' armbian-sdk/lib/functions/compilation/uboot.sh
 
-      - name: 强制跳过 U-Boot 编译（修改 SDK 源码）
-        run: |
-          # 在 artifacts-obtain.sh 中注入自定义函数，检测到 SKIP_UBOOT_BUILD 时直接返回
-          sed -i '/^function obtain_complete_artifact()/a \
-            # 检查板级配置中是否设置了 SKIP_UBOOT_BUILD\
-            if [[ "${SKIP_UBOOT_BUILD}" == "yes" ]] && [[ "${artifact}" == "uboot" ]]; then\
-              echo ">> 板级配置要求跳过 U-Boot 构建，直接使用预编译文件"\
-              return 0\
-            fi' armbian-sdk/lib/functions/artifacts/artifacts-obtain.sh
-
-          # 将 SKIP_UBOOT_BUILD 追加到 .wip 文件中
-          echo "SKIP_UBOOT_BUILD=yes" >> armbian-sdk/config/boards/s905x-p212.wip
-
-          echo "修改后的 artifacts-obtain.sh 相关函数："
-          grep -A 5 "function obtain_complete_artifact()" armbian-sdk/lib/functions/artifacts/artifacts-obtain.sh || true
+          echo "修改后的 compile_uboot_target 函数："
+          grep -A 4 "function compile_uboot_target()" armbian-sdk/lib/functions/compilation/uboot.sh || true
 
       - name: 配置宿主机的 QEMU 支持（智能注册，避免重复）
         run: |
@@ -127,6 +115,6 @@ jobs:
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 Armbian 官方 SDK 构建 (预编译U-Boot + 自定义DTB)
+            📦 Armbian 官方 SDK 构建 (强制跳过U-Boot编译)
             - 内核: unifreq/linux-${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
