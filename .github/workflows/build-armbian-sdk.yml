@@ -33,34 +33,39 @@ jobs:
         run: |
           docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
-      - name: 准备自定义文件结构
+      - name: 准备完整的构建环境
         run: |
-          # 创建 Armbian SDK 期望的目录结构
+          # 克隆官方构建框架到 armbian-sdk
+          git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
+          
+          # 将你的自定义配置和 overlay 放进去
           mkdir -p armbian-sdk/config/boards
-          mkdir -p armbian-sdk/userpatches/overlay
-          # 复制板级配置
           cp config/boards/s905x-p212.wip armbian-sdk/config/boards/
-          # 复制 overlay (DTB)
+          
           if [ -d "userpatches/overlay" ]; then
             cp -r userpatches/overlay/* armbian-sdk/userpatches/overlay/
           fi
-          echo "✅ 自定义文件已准备好"
+          
+          echo "✅ 构建环境已准备完毕"
+          echo "板级配置："
+          cat armbian-sdk/config/boards/s905x-p212.wip
+          echo "自定义文件列表："
+          find armbian-sdk/userpatches -type f || true
 
       - name: 在 Docker 容器内编译
         run: |
+          mkdir -p output
           docker run --rm \
             -v "$PWD/armbian-sdk":/armbian \
             -v "$PWD/output":/armbian/output \
-            -e USERPATCHES_PATH="/armbian/userpatches" \
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
-              set -e
               cd /armbian
-              echo '板级配置内容：'
-              cat config/boards/s905x-p212.wip
-              echo '自定义 DTB 文件：'
-              find userpatches/overlay -type f || true
-              # 运行编译（直接调用 compile.sh，容器内是 root 用户）
+              echo '>> 当前工作目录：'
+              pwd
+              echo '>> compile.sh 是否存在：'
+              ls -l compile.sh
+              echo '>> 开始编译...'
               ./compile.sh \
                 BOARD=s905x-p212.wip \
                 BRANCH=current \
@@ -71,14 +76,15 @@ jobs:
                 BUILD_DESKTOP=no \
                 KERNEL_CONFIGURE=no \
                 FORCE_BOOTSCRIPT_UPDATE=nope \
-                USE_CCACHE=yes
+                USE_CCACHE=yes \
+                docker=no
             "
 
       - name: 收集镜像
         run: |
           mkdir -p output-final
-          cp output/output/images/*.img.xz output-final/ 2>/dev/null || true
-          cp output/output/images/*.img.gz output-final/ 2>/dev/null || true
+          cp output/images/*.img.xz output-final/ 2>/dev/null || true
+          cp output/images/*.img.gz output-final/ 2>/dev/null || true
 
       - name: 上传到 Release
         uses: ncipollo/release-action@main
