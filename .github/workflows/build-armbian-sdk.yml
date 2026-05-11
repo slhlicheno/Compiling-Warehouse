@@ -45,6 +45,19 @@ jobs:
       - name: 拉取 Armbian 官方构建镜像
         run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
+      - name: 配置宿主机的 QEMU 支持
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-user-static
+          sudo modprobe binfmt_misc 2>/dev/null || true
+          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
+          if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
+            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
+            echo "✅ ARM64 binfmt 已注册"
+          else
+            echo "✅ ARM64 binfmt 已存在"
+          fi
+
       - name: 编译标准 Armbian 镜像 (基于 odroidn2)
         run: |
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
@@ -66,7 +79,7 @@ jobs:
                 KERNEL_ONLY=no \
                 docker=no
             "
-          # 找到生成的标准镜像 (通常是 .img 文件)
+          # 找到生成的标准镜像
           STANDARD_IMG=$(ls standard-output/output/images/*.img 2>/dev/null | head -1)
           if [ -z "$STANDARD_IMG" ]; then
             echo "❌ 未找到标准镜像"
@@ -77,7 +90,6 @@ jobs:
       # ═══════════════ 阶段2：ophub 本地化打包 ═══════════════
       - name: 准备 ophub 本地化所需的自定义 DTB
         run: |
-          # ophub rebuild 会读取 /opt/different-files/<设备代号>/boot/dtb/amlogic/ 下的文件
           mkdir -p /opt/different-files/s905lb-r3300l/boot/dtb/amlogic
           # 如果你的 DTB 在仓库中，直接复制
           if [ -f "userpatches/overlay/boot/dtb/amlogic/meson-gxl-s905x-p212.dtb" ]; then
@@ -96,13 +108,11 @@ jobs:
           auto_kernel: true
           kernel_repo: ophub/kernel
           builder_name: "custom"
-          # 指定 different-files 路径，确保你的 DTB 被注入
           different_files_path: "/opt/different-files"
 
       - name: 收集最终镜像并上传
         run: |
           mkdir -p output-final
-          # ophub action 的输出通常在 ${{ github.workspace }}/output
           cp ${{ github.workspace }}/output/*.img.xz output-final/ 2>/dev/null || true
           cp ${{ github.workspace }}/output/*.img.gz output-final/ 2>/dev/null || true
           echo "✅ 最终镜像已收集"
