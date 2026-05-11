@@ -1,4 +1,4 @@
-name: Build Armbian (SDK Kernel + Custom Assembly)
+name: Build Armbian (标准编译 + ophub 本地化打包)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ on:
           - trixie
           - noble
       kernel_branch:
-        description: "内核分支 (unifreq 仓库)"
+        description: "内核分支 (ophub 预编译内核)"
         required: true
         type: choice
         default: "5.15.y"
@@ -21,238 +21,101 @@ on:
           - 5.15.y
           - 6.1.y
           - 6.6.y
-      base_release_tag:
-        description: "存放基础镜像的 Release Tag"
-        required: true
-        default: "armbian-Base-Image"
       target_soc:
-        description: "目标设备 SoC"
+        description: "目标设备 SOC (用于 ophub 本地化)"
         required: true
         type: choice
-        default: 's905lb'
+        default: 's905x'
         options:
-          - s905lb
           - s905x
           - s905x3
-
-env:
-  TZ: Etc/UTC
-  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-permissions:
-  contents: write
+          - s912
+          - s922x
+          - rk3568
+          - h6
 
 jobs:
   build:
     runs-on: ubuntu-24.04
     steps:
-      - name: 检出你的仓库
+      - name: 检出你的仓库 (获取自定义 DTB)
         uses: actions/checkout@v4
 
-      # ═══════════════ 阶段1：SDK 只编译内核 ═══════════════
+      # ═══════════════ 阶段1：编译标准 Armbian 镜像 ═══════════════
       - name: 拉取 Armbian 官方构建镜像
         run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
-      - name: 准备 SDK 环境
+      - name: 编译标准 Armbian 镜像 (基于 odroidn2)
         run: |
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
-          cat > armbian-sdk/config/boards/kernel-only.wip << 'EOF'
-          BOARD_NAME="Kernel Only"
-          BOARDFAMILY="meson64"
-          KERNEL_TARGET="current,edge"
-          FULL_DESKTOP="no"
-          EOF
-
-      - name: 配置 QEMU 支持
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y qemu-user-static
-          sudo modprobe binfmt_misc 2>/dev/null || true
-          sudo mount -t binfmt_misc binfmt_misc /proc/sys/fs/binfmt_misc 2>/dev/null || true
-          if [ ! -f /proc/sys/fs/binfmt_misc/qemu-aarch64 ]; then
-            echo ':qemu-aarch64:M::\x7fELF\x02\x01\x01\x00\x00\x00\x00\x00\x00\x00\x00\x00\x02\x00\xb7\x00:\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xff\xfe\xff\xff\xff:/usr/bin/qemu-aarch64-static:F' | sudo tee /proc/sys/fs/binfmt_misc/register
-          fi
-
-      - name: 编译内核 (KERNEL_ONLY)
-        run: |
-          mkdir -p kernel-output
+          mkdir -p standard-output
           docker run --rm --privileged \
             -v "$PWD/armbian-sdk":/armbian \
-            -v "$PWD/kernel-output":/armbian/output \
+            -v "$PWD/standard-output":/armbian/output \
             -e ALLOW_ROOT=yes \
             ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest \
             /bin/bash -c "
               cd /armbian
               ./compile.sh \
-                BOARD=kernel-only.wip \
+                BOARD=odroidn2 \
                 BRANCH=current \
                 RELEASE=${{ inputs.armbian_release }} \
-                KERNELSOURCE=https://github.com/unifreq/linux-${{ inputs.kernel_branch }} \
-                KERNELBRANCH=${{ inputs.kernel_branch }} \
-                KERNEL_ONLY=yes \
+                BUILD_MINIMAL=yes \
+                BUILD_DESKTOP=no \
                 KERNEL_CONFIGURE=no \
-                USE_CCACHE=yes \
+                KERNEL_ONLY=no \
                 docker=no
             "
-
-      # ═══════════════ 阶段2：自主组装镜像 ═══════════════
-      - name: 初始化打包环境
-        run: sudo apt-get update && sudo apt-get install -y xz-utils jq curl wget
-
-      - name: 下载基础镜像 (trunk + rootfs)
-        id: download
-        run: |
-          TAG="${{ inputs.base_release_tag }}"
-          RELEASE="${{ inputs.armbian_release }}"
-          API_URL="https://api.github.com/repos/${{ github.repository }}/releases/tags/$TAG"
-          ASSETS_JSON=$(curl -s -H "Accept: application/vnd.github+json" -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" "$API_URL" | jq '.assets')
-
-          TRUNK=$(echo "$ASSETS_JSON" | jq -r --arg REL "$RELEASE" 'map(select(.name | contains("-trunk") and contains($REL) and endswith(".img.gz"))) | sort_by(.updated_at) | reverse | .[0]')
-          TRUNK_URL=$(echo "$TRUNK" | jq -r '.url')
-          TRUNK_NAME=$(echo "$TRUNK" | jq -r '.name')
-
-          ROOTFS=$(echo "$ASSETS_JSON" | jq -r --arg REL "$RELEASE" 'map(select(.name | contains("rootfs") and contains($REL) and (contains("docker") | not) and endswith(".tar.gz"))) | .[0]')
-          ROOTFS_URL=$(echo "$ROOTFS" | jq -r '.url')
-          ROOTFS_NAME=$(echo "$ROOTFS" | jq -r '.name')
-
-          if [[ -z "$TRUNK_NAME" || "$TRUNK_NAME" == "null" ]] || [[ -z "$ROOTFS_NAME" || "$ROOTFS_NAME" == "null" ]]; then
-            echo "❌ 未找到基础镜像"
+          # 找到生成的标准镜像 (通常是 .img 文件)
+          STANDARD_IMG=$(ls standard-output/output/images/*.img 2>/dev/null | head -1)
+          if [ -z "$STANDARD_IMG" ]; then
+            echo "❌ 未找到标准镜像"
             exit 1
           fi
+          echo "standard_image=$STANDARD_IMG" >> $GITHUB_ENV
 
-          curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/octet-stream" "$TRUNK_URL" -o "$TRUNK_NAME"
-          curl -fsSL -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" -H "Accept: application/octet-stream" "$ROOTFS_URL" -o "$ROOTFS_NAME"
-          echo "trunk_image=$TRUNK_NAME" >> $GITHUB_ENV
-          echo "rootfs_file=$ROOTFS_NAME" >> $GITHUB_ENV
-
-      - name: 组装最终镜像
-        id: assemble
+      # ═══════════════ 阶段2：ophub 本地化打包 ═══════════════
+      - name: 准备 ophub 本地化所需的自定义 DTB
         run: |
-          gzip -d "${{ env.trunk_image }}"
-          TRUNK_IMG="${trunk_image%.gz}"
-          TRUNK_LOOP=$(sudo losetup -fP --show "$TRUNK_IMG")
-          sudo partprobe "$TRUNK_LOOP" || true
-          sleep 2
-          sudo mount "${TRUNK_LOOP}p1" /mnt
-
-          BOOT_SIZE_MB=128
-          mkdir -p /tmp/rootfs
-          sudo tar -xzf "${{ env.rootfs_file }}" -C /tmp/rootfs
-          ROOTFS_SIZE_MB=$(sudo du -sm /tmp/rootfs | awk '{print $1}')
-          RESERVE_MB=512
-          IMG_SIZE_MB=$(( BOOT_SIZE_MB + ROOTFS_SIZE_MB + RESERVE_MB ))
-
-          dd if=/dev/zero of=final.img bs=1M count="$IMG_SIZE_MB"
-          sudo parted final.img --script mklabel msdos
-          sudo parted final.img --script mkpart primary fat32 1 "$BOOT_SIZE_MB"
-          sudo parted final.img --script mkpart primary ext4 "$BOOT_SIZE_MB" 100%
-          LOOP_DEV=$(sudo losetup -fP --show final.img)
-          sudo partprobe "$LOOP_DEV" || true
-          sleep 2
-          sudo mkfs.vfat "${LOOP_DEV}p1"
-          sudo mkfs.ext4 "${LOOP_DEV}p2"
-
-          sudo mkdir -p /mnt2 /mnt3
-          sudo mount "${LOOP_DEV}p1" /mnt2
-          sudo mount "${LOOP_DEV}p2" /mnt3
-
-          for item in /mnt/*; do
-            base=$(basename "$item")
-            case "$base" in
-              bin|dev|etc|home|lib|lib64|media|mnt|opt|proc|root|run|sbin|selinux|srv|sys|tmp|usr|var|lost+found)
-                echo "跳过系统目录: $base" ;;
-              *)
-                sudo cp -rL "$item" /mnt2/ 2>/dev/null || echo "跳过: $base" ;;
-            esac
-          done
-          sudo umount /mnt
-          sudo losetup -d "$TRUNK_LOOP"
-
-          sudo mv /tmp/rootfs/* /mnt3/
-          sudo rm -rf /tmp/rootfs
-
-          # 注入内核
-          mkdir -p kernel_tmp
-          tar -czf kernel.tar.gz -C kernel-output .
-          tar -xzf kernel.tar.gz -C kernel_tmp
-          if [ -d kernel_tmp/boot ]; then
-            sudo cp -a kernel_tmp/boot/* /mnt2/
-          fi
-          if [ -d kernel_tmp/lib/modules ]; then
-            sudo rsync -a kernel_tmp/lib/modules/ /mnt3/lib/modules/
-          fi
-          if [ -d kernel_tmp/usr ]; then
-            sudo cp -a kernel_tmp/usr/* /mnt3/usr/
-          fi
-          rm -rf kernel_tmp kernel.tar.gz
-
-          if [ ! -L /mnt2/zImage ]; then
-            VMLINUZ=$(ls /mnt2/vmlinuz-* 2>/dev/null | head -1)
-            [ -n "$VMLINUZ" ] && sudo ln -sf $(basename "$VMLINUZ") /mnt2/zImage
-          fi
-          if [ ! -L /mnt2/uInitrd ]; then
-            INITRD=$(ls /mnt2/uInitrd-* /mnt2/initrd.img-* 2>/dev/null | head -1)
-            [ -n "$INITRD" ] && sudo ln -sf $(basename "$INITRD") /mnt2/uInitrd
-          fi
-
-          # 注入自定义 DTB
-          PLATFORM="amlogic"
-          DTB_FILE="${{ github.workspace }}/userpatches/overlay/boot/dtb/${PLATFORM}/meson-gxl-s905x-p212.dtb"
-          if [ -f "$DTB_FILE" ]; then
-            sudo mkdir -p /mnt2/dtb/${PLATFORM}
-            sudo cp "$DTB_FILE" /mnt2/dtb/${PLATFORM}/
-            echo "✅ 自定义 DTB 已注入"
+          # ophub rebuild 会读取 /opt/different-files/<设备代号>/boot/dtb/amlogic/ 下的文件
+          mkdir -p /opt/different-files/s905lb-r3300l/boot/dtb/amlogic
+          # 如果你的 DTB 在仓库中，直接复制
+          if [ -f "userpatches/overlay/boot/dtb/amlogic/meson-gxl-s905x-p212.dtb" ]; then
+            cp userpatches/overlay/boot/dtb/amlogic/meson-gxl-s905x-p212.dtb /opt/different-files/s905lb-r3300l/boot/dtb/amlogic/
+            echo "✅ 自定义 DTB 已准备"
           else
-            echo "⚠️ 未找到自定义 DTB: $DTB_FILE"
+            echo "⚠️ 未找到自定义 DTB，使用 ophub 默认"
           fi
 
-          # 注入自定义 U-Boot
-          if [ -d "uboot" ] && [ "$(ls -A uboot 2>/dev/null)" ]; then
-            sudo cp -a uboot/* /mnt2/
-            echo "✅ 自定义 U-Boot 已注入"
-          fi
+      - name: 使用 ophub 进行本地化打包
+        uses: ophub/amlogic-s9xxx-armbian@main
+        with:
+          armbian_path: ${{ env.standard_image }}
+          armbian_soc: ${{ inputs.target_soc }}
+          armbian_kernel: ${{ inputs.kernel_branch }}
+          auto_kernel: true
+          kernel_repo: ophub/kernel
+          builder_name: "custom"
+          # 指定 different-files 路径，确保你的 DTB 被注入
+          different_files_path: "/opt/different-files"
 
-          # 配置 extlinux.conf
-          EXTLINUX_CONF="/mnt2/extlinux/extlinux.conf"
-          EXTLINUX_BAK="/mnt2/extlinux/extlinux.conf.bak"
-          NEW_FDT="/dtb/${PLATFORM}/meson-gxl-s905x-p212.dtb"
-          if [ -f "$EXTLINUX_CONF" ]; then
-            sudo cp "$EXTLINUX_CONF" "$EXTLINUX_BAK"
-            sudo sed -i "s|^[[:space:]]*FDT.*|  FDT ${NEW_FDT}|g" "$EXTLINUX_CONF"
-          else
-            sudo mkdir -p /mnt2/extlinux
-            sudo tee "$EXTLINUX_CONF" > /dev/null << 'CONFEOF'
-          LABEL Armbian
-          LINUX /zImage
-          INITRD /uInitrd
-          FDT PLACEHOLDER_FDT
-          APPEND root=UUID=00000000-0000-0000-0000-000000000000 rootflags=data=writeback rw rootfstype=ext4 console=ttyAML0,115200n8 no_console_suspend consoleblank=0 fsck.fix=yes fsck.repair=yes net.ifnames=0
-          CONFEOF
-            sudo sed -i "s|PLACEHOLDER_FDT|${NEW_FDT}|g" "$EXTLINUX_CONF"
-            sudo cp "$EXTLINUX_CONF" "$EXTLINUX_BAK"
-          fi
-
-          sudo umount /mnt2 /mnt3
-          sudo losetup -d "$LOOP_DEV"
-          xz -T0 final.img
-
-          TODAY=$(date +"%Y%m%d")
-          KERNEL_VER=$(ls kernel-output/vmlinuz-* 2>/dev/null | head -1 | sed 's/.*vmlinuz-//')
-          [ -z "$KERNEL_VER" ] && KERNEL_VER="${{ inputs.kernel_branch }}"
-          FINAL_NAME="Armbian_${{ inputs.armbian_release }}_${{ inputs.target_soc }}_${KERNEL_VER}_${TODAY}.img.xz"
-          mv final.img.xz "$FINAL_NAME"
-          echo "packaged_image=$FINAL_NAME" >> $GITHUB_ENV
+      - name: 收集最终镜像并上传
+        run: |
+          mkdir -p output-final
+          # ophub action 的输出通常在 ${{ github.workspace }}/output
+          cp ${{ github.workspace }}/output/*.img.xz output-final/ 2>/dev/null || true
+          cp ${{ github.workspace }}/output/*.img.gz output-final/ 2>/dev/null || true
+          echo "✅ 最终镜像已收集"
 
       - name: 上传到 Release
         uses: ncipollo/release-action@main
         with:
           tag: "Armbian-${{ inputs.armbian_release }}-${{ inputs.target_soc }}-${{ inputs.kernel_branch }}"
-          artifacts: ${{ env.packaged_image }}
+          artifacts: "output-final/*.img.*"
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 自定义 Armbian (SDK 内核 + 自主打包)
-            - 内核: unifreq/linux-${{ inputs.kernel_branch }}
+            📦 Armbian (标准编译 + ophub 本地化)
+            - 内核: ophub/kernel ${{ inputs.kernel_branch }}
             - 系统: ${{ inputs.armbian_release }}
-            - 设备: ${{ inputs.target_soc }}
-            - DTB: meson-gxl-s905x-p212.dtb
+            - 设备: ${{ inputs.target_soc }} (含 R3300L 专属 DTB)
