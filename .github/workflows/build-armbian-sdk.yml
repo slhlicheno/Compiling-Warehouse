@@ -49,14 +49,13 @@ jobs:
       - name: 检出你的仓库
         uses: actions/checkout@v4
 
-      # ============== 阶段1: 使用 SDK 编译内核 ==============
+      # ═══════════════ 阶段1：SDK 只编译内核 ═══════════════
       - name: 拉取 Armbian 官方构建镜像
         run: docker pull ghcr.io/armbian/docker-armbian-build:armbian-ubuntu-noble-latest
 
       - name: 准备 SDK 环境
         run: |
           git clone --depth=1 --branch=main https://github.com/armbian/build armbian-sdk
-          # 极简板级配置，仅用于内核编译
           cat > armbian-sdk/config/boards/kernel-only.wip << 'EOF'
           BOARD_NAME="Kernel Only"
           BOARDFAMILY="meson64"
@@ -64,7 +63,7 @@ jobs:
           FULL_DESKTOP="no"
           EOF
 
-      - name: 配置 QEMU
+      - name: 配置 QEMU 支持
         run: |
           sudo apt-get update
           sudo apt-get install -y qemu-user-static
@@ -96,7 +95,7 @@ jobs:
                 docker=no
             "
 
-      # ============== 阶段2: 自定义打包 ==============
+      # ═══════════════ 阶段2：自主组装镜像 ═══════════════
       - name: 初始化打包环境
         run: sudo apt-get update && sudo apt-get install -y xz-utils jq curl wget
 
@@ -117,7 +116,7 @@ jobs:
           ROOTFS_NAME=$(echo "$ROOTFS" | jq -r '.name')
 
           if [[ -z "$TRUNK_NAME" || "$TRUNK_NAME" == "null" ]] || [[ -z "$ROOTFS_NAME" || "$ROOTFS_NAME" == "null" ]]; then
-            echo "❌ 基础镜像或 rootfs 未找到"
+            echo "❌ 未找到基础镜像"
             exit 1
           fi
 
@@ -129,7 +128,6 @@ jobs:
       - name: 组装最终镜像
         id: assemble
         run: |
-          # 解压 trunk 镜像
           gzip -d "${{ env.trunk_image }}"
           TRUNK_IMG="${trunk_image%.gz}"
           TRUNK_LOOP=$(sudo losetup -fP --show "$TRUNK_IMG")
@@ -137,7 +135,6 @@ jobs:
           sleep 2
           sudo mount "${TRUNK_LOOP}p1" /mnt
 
-          # 计算镜像大小
           BOOT_SIZE_MB=128
           mkdir -p /tmp/rootfs
           sudo tar -xzf "${{ env.rootfs_file }}" -C /tmp/rootfs
@@ -145,7 +142,6 @@ jobs:
           RESERVE_MB=512
           IMG_SIZE_MB=$(( BOOT_SIZE_MB + ROOTFS_SIZE_MB + RESERVE_MB ))
 
-          # 创建新镜像并分区
           dd if=/dev/zero of=final.img bs=1M count="$IMG_SIZE_MB"
           sudo parted final.img --script mklabel msdos
           sudo parted final.img --script mkpart primary fat32 1 "$BOOT_SIZE_MB"
@@ -160,7 +156,6 @@ jobs:
           sudo mount "${LOOP_DEV}p1" /mnt2
           sudo mount "${LOOP_DEV}p2" /mnt3
 
-          # 从 trunk 复制启动文件
           for item in /mnt/*; do
             base=$(basename "$item")
             case "$base" in
@@ -173,11 +168,10 @@ jobs:
           sudo umount /mnt
           sudo losetup -d "$TRUNK_LOOP"
 
-          # 移动 rootfs 到新镜像
           sudo mv /tmp/rootfs/* /mnt3/
           sudo rm -rf /tmp/rootfs
 
-          # 注入内核（从 SDK 编译产物）
+          # 注入内核
           mkdir -p kernel_tmp
           tar -czf kernel.tar.gz -C kernel-output .
           tar -xzf kernel.tar.gz -C kernel_tmp
@@ -192,7 +186,6 @@ jobs:
           fi
           rm -rf kernel_tmp kernel.tar.gz
 
-          # 软链接
           if [ ! -L /mnt2/zImage ]; then
             VMLINUZ=$(ls /mnt2/vmlinuz-* 2>/dev/null | head -1)
             [ -n "$VMLINUZ" ] && sudo ln -sf $(basename "$VMLINUZ") /mnt2/zImage
@@ -203,12 +196,14 @@ jobs:
           fi
 
           # 注入自定义 DTB
-          BOARD="${{ inputs.target_soc }}"
           PLATFORM="amlogic"
-          DTB_FILE="${{ github.workspace }}/userpatches/overlay/boot/dtb/${PLATFORM}/${BOARD}.dtb"
+          DTB_FILE="${{ github.workspace }}/userpatches/overlay/boot/dtb/${PLATFORM}/meson-gxl-s905x-p212.dtb"
           if [ -f "$DTB_FILE" ]; then
             sudo mkdir -p /mnt2/dtb/${PLATFORM}
             sudo cp "$DTB_FILE" /mnt2/dtb/${PLATFORM}/
+            echo "✅ 自定义 DTB 已注入"
+          else
+            echo "⚠️ 未找到自定义 DTB: $DTB_FILE"
           fi
 
           # 注入自定义 U-Boot
@@ -220,7 +215,7 @@ jobs:
           # 配置 extlinux.conf
           EXTLINUX_CONF="/mnt2/extlinux/extlinux.conf"
           EXTLINUX_BAK="/mnt2/extlinux/extlinux.conf.bak"
-          NEW_FDT="/dtb/${PLATFORM}/${BOARD}.dtb"
+          NEW_FDT="/dtb/${PLATFORM}/meson-gxl-s905x-p212.dtb"
           if [ -f "$EXTLINUX_CONF" ]; then
             sudo cp "$EXTLINUX_CONF" "$EXTLINUX_BAK"
             sudo sed -i "s|^[[:space:]]*FDT.*|  FDT ${NEW_FDT}|g" "$EXTLINUX_CONF"
@@ -237,7 +232,6 @@ jobs:
             sudo cp "$EXTLINUX_CONF" "$EXTLINUX_BAK"
           fi
 
-          # 卸载并压缩
           sudo umount /mnt2 /mnt3
           sudo losetup -d "$LOOP_DEV"
           xz -T0 final.img
@@ -257,4 +251,8 @@ jobs:
           allowUpdates: true
           token: ${{ secrets.GITHUB_TOKEN }}
           body: |
-            📦 自定义 Arm
+            📦 自定义 Armbian (SDK 内核 + 自主打包)
+            - 内核: unifreq/linux-${{ inputs.kernel_branch }}
+            - 系统: ${{ inputs.armbian_release }}
+            - 设备: ${{ inputs.target_soc }}
+            - DTB: meson-gxl-s905x-p212.dtb
