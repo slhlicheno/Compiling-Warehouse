@@ -31,8 +31,6 @@ on:
           - s905x3
           - s912
           - s922x
-          - rk3568
-          - h6
 
 jobs:
   build:
@@ -76,7 +74,6 @@ jobs:
                 BUILD_MINIMAL=yes \
                 BUILD_DESKTOP=no \
                 KERNEL_CONFIGURE=no \
-                KERNEL_ONLY=no \
                 docker=no
             "
           # 找到生成的标准镜像
@@ -91,7 +88,6 @@ jobs:
       - name: 准备 ophub 本地化所需的自定义 DTB
         run: |
           mkdir -p /opt/different-files/s905lb-r3300l/boot/dtb/amlogic
-          # 如果你的 DTB 在仓库中，直接复制
           if [ -f "userpatches/overlay/boot/dtb/amlogic/meson-gxl-s905x-p212.dtb" ]; then
             cp userpatches/overlay/boot/dtb/amlogic/meson-gxl-s905x-p212.dtb /opt/different-files/s905lb-r3300l/boot/dtb/amlogic/
             echo "✅ 自定义 DTB 已准备"
